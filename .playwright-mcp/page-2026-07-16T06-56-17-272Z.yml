@@ -1,0 +1,558 @@
+- generic [ref=e2]:
+  - region "Skip to main content":
+    - link "Skip to main content" [ref=e3] [cursor=pointer]:
+      - /url: "#__docusaurus_skipToContent_fallback"
+  - navigation "Main" [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - link "Playwright logo Playwright" [ref=e7] [cursor=pointer]:
+          - /url: /
+          - img "Playwright logo" [ref=e9]
+          - generic [ref=e10]: Playwright
+        - link "Docs" [ref=e11] [cursor=pointer]:
+          - /url: /docs/intro
+        - link "MCP" [ref=e12] [cursor=pointer]:
+          - /url: /mcp/introduction
+        - link "CLI" [ref=e13] [cursor=pointer]:
+          - /url: /agent-cli/introduction
+        - link "API" [ref=e14] [cursor=pointer]:
+          - /url: /docs/api/class-playwright
+        - button "Node.js" [ref=e16] [cursor=pointer]
+      - generic [ref=e17]:
+        - link "GitHub repository" [ref=e18] [cursor=pointer]:
+          - /url: https://github.com/microsoft/playwright
+        - link "Discord server" [ref=e19] [cursor=pointer]:
+          - /url: https://aka.ms/playwright/discord
+        - button "Switch between dark and light mode (currently system mode)" [disabled] [ref=e21]
+        - button "Search (Meta+k)" [ref=e25] [cursor=pointer]:
+          - generic [ref=e26]: Search
+  - main [ref=e34]:
+    - generic [ref=e36]:
+      - generic [ref=e38]:
+        - article [ref=e39]:
+          - generic [ref=e40]:
+            - heading "Playwright MCP" [level=1] [ref=e42]
+            - heading [level=2] [ref=e43]:
+              - text: Introduction
+              - link "Direct link to Introduction" [ref=e44] [cursor=pointer]:
+                - /url: "#introduction"
+                - text: "#"
+            - paragraph [ref=e45]:
+              - text: The Playwright MCP server provides browser automation capabilities through the
+              - link "Model Context Protocol" [ref=e46] [cursor=pointer]:
+                - /url: https://modelcontextprotocol.io
+              - text: ", enabling LLMs to interact with web pages using structured accessibility snapshots. It works with VS Code, Cursor, Windsurf, Claude Desktop, and any other MCP client — no vision models required."
+            - heading [level=2] [ref=e47]:
+              - text: Prerequisites
+              - link "Direct link to Prerequisites" [ref=e48] [cursor=pointer]:
+                - /url: "#prerequisites"
+                - text: "#"
+            - paragraph [ref=e49]: "Before you begin, make sure you have the following installed:"
+            - list [ref=e50]:
+              - listitem [ref=e51]:
+                - link "Node.js" [ref=e52] [cursor=pointer]:
+                  - /url: https://nodejs.org/
+                - text: 18 or newer
+              - listitem [ref=e53]: "An MCP client: VS Code, Cursor, Windsurf, Claude Code, Claude Desktop, or similar"
+            - heading [level=2] [ref=e54]:
+              - text: Getting Started
+              - link "Direct link to Getting Started" [ref=e55] [cursor=pointer]:
+                - /url: "#getting-started"
+                - text: "#"
+            - heading [level=3] [ref=e56]:
+              - text: Installation
+              - link "Direct link to Installation" [ref=e57] [cursor=pointer]:
+                - /url: "#installation"
+                - text: "#"
+            - paragraph [ref=e58]: "Add the Playwright MCP server to your client using the standard configuration:"
+            - code [ref=e62]:
+              - generic [ref=e63]: "{"
+              - generic [ref=e64]: "\"mcpServers\": {"
+              - generic [ref=e65]: "\"playwright\": {"
+              - generic [ref=e66]: "\"command\": \"npx\","
+              - generic [ref=e67]: "\"args\": ["
+              - generic [ref=e68]: "\"@playwright/mcp@latest\""
+              - generic [ref=e69]: "]"
+              - generic [ref=e70]: "}"
+              - generic [ref=e71]: "}"
+              - generic [ref=e72]: "}"
+            - heading [level=4] [ref=e73]:
+              - text: VS Code
+              - link "Direct link to VS Code" [ref=e74] [cursor=pointer]:
+                - /url: "#vs-code"
+                - text: "#"
+            - paragraph [ref=e75]: "Click one of the buttons below to install directly:"
+            - paragraph [ref=e76]:
+              - link [ref=e77] [cursor=pointer]:
+                - /url: https://insiders.vscode.dev/redirect?url=vscode%3Amcp%2Finstall%3F%257B%2522name%2522%253A%2522playwright%2522%252C%2522command%2522%253A%2522npx%2522%252C%2522args%2522%253A%255B%2522%2540playwright%252Fmcp%2540latest%2522%255D%257D
+                - img "Install in VS Code" [ref=e78]
+              - link [ref=e79] [cursor=pointer]:
+                - /url: https://insiders.vscode.dev/redirect?url=vscode-insiders%3Amcp%2Finstall%3F%257B%2522name%2522%253A%2522playwright%2522%252C%2522command%2522%253A%2522npx%2522%252C%2522args%2522%253A%255B%2522%2540playwright%252Fmcp%2540latest%2522%255D%257D
+                - img "Install in VS Code Insiders" [ref=e80]
+            - paragraph [ref=e81]: "Or install via the VS Code CLI:"
+            - code [ref=e85]:
+              - generic [ref=e86]: "code --add-mcp '{\"name\":\"playwright\",\"command\":\"npx\",\"args\":[\"@playwright/mcp@latest\"]}'"
+            - heading [level=4] [ref=e87]:
+              - text: Cursor
+              - link "Direct link to Cursor" [ref=e88] [cursor=pointer]:
+                - /url: "#cursor"
+                - text: "#"
+            - paragraph [ref=e89]:
+              - link [ref=e90] [cursor=pointer]:
+                - /url: https://cursor.com/en/install-mcp?name=Playwright&config=eyJjb21tYW5kIjoibnB4IEBwbGF5d3JpZ2h0L21jcEBsYXRlc3QifQ%3D%3D
+                - img "Install in Cursor" [ref=e91]
+            - paragraph [ref=e92]:
+              - text: Or go to
+              - code [ref=e93]: Cursor Settings
+              - text: →
+              - code [ref=e94]: MCP
+              - text: →
+              - code [ref=e95]: Add new MCP Server
+              - text: and use command type with
+              - code [ref=e96]: npx @playwright/mcp@latest
+              - text: .
+            - heading [level=4] [ref=e97]:
+              - text: Claude Code
+              - link "Direct link to Claude Code" [ref=e98] [cursor=pointer]:
+                - /url: "#claude-code"
+                - text: "#"
+            - code [ref=e102]:
+              - generic [ref=e103]: claude mcp add playwright npx @playwright/mcp@latest
+            - heading [level=4] [ref=e104]:
+              - text: Claude Desktop
+              - link "Direct link to Claude Desktop" [ref=e105] [cursor=pointer]:
+                - /url: "#claude-desktop"
+                - text: "#"
+            - paragraph [ref=e106]:
+              - text: Follow the MCP install
+              - link "guide" [ref=e107] [cursor=pointer]:
+                - /url: https://modelcontextprotocol.io/quickstart/user
+              - text: and use the standard config above.
+            - heading [level=4] [ref=e108]:
+              - text: Other clients
+              - link "Direct link to Other clients" [ref=e109] [cursor=pointer]:
+                - /url: "#other-clients"
+                - text: "#"
+            - paragraph [ref=e110]: The standard configuration works with most MCP clients, including Windsurf, Cline, Goose, Kiro, Codex, Copilot CLI, and others. Consult your client's MCP documentation for where to place the config.
+            - heading [level=3] [ref=e111]:
+              - text: First interaction
+              - link "Direct link to First interaction" [ref=e112] [cursor=pointer]:
+                - /url: "#first-interaction"
+                - text: "#"
+            - paragraph [ref=e113]: "Once the server is connected, ask your AI assistant to interact with a web page:"
+            - code [ref=e117]:
+              - generic [ref=e118]: Navigate to https://demo.playwright.dev/todomvc and add a few todo items.
+            - paragraph [ref=e119]: The assistant will use Playwright MCP tools to open the browser, navigate to the page, and interact with elements — all through structured accessibility snapshots rather than screenshots.
+            - heading [level=2] [ref=e120]:
+              - text: Core Features
+              - link "Direct link to Core Features" [ref=e121] [cursor=pointer]:
+                - /url: "#core-features"
+                - text: "#"
+            - heading [level=3] [ref=e122]:
+              - text: Accessibility snapshots
+              - link "Direct link to Accessibility snapshots" [ref=e123] [cursor=pointer]:
+                - /url: "#accessibility-snapshots"
+                - text: "#"
+            - paragraph [ref=e124]: "Playwright MCP operates on the page's accessibility tree, not pixels. When a tool runs, it returns a structured snapshot showing the page elements, their roles, and text content. The LLM uses element references from these snapshots to interact with the page:"
+            - code [ref=e128]:
+              - generic [ref=e129]: "- heading \"todos\" [level=1]"
+              - generic [ref=e130]: "- textbox \"What needs to be done?\" [ref=e5]"
+              - generic [ref=e131]: "- listitem:"
+              - generic [ref=e132]: "- checkbox \"Toggle Todo\" [ref=e10]"
+              - generic [ref=e133]: "- text: \"Buy groceries\""
+            - paragraph [ref=e134]:
+              - text: The LLM reads this snapshot and uses
+              - code [ref=e135]: ref=e5
+              - text: to type into the textbox or
+              - code [ref=e136]: ref=e10
+              - text: to check the checkbox.
+            - heading [level=3] [ref=e137]:
+              - text: Interacting with pages
+              - link "Direct link to Interacting with pages" [ref=e138] [cursor=pointer]:
+                - /url: "#interacting-with-pages"
+                - text: "#"
+            - paragraph [ref=e139]: "Playwright MCP provides tools for all common browser interactions:"
+            - list [ref=e140]:
+              - listitem [ref=e141]:
+                - strong [ref=e142]: Navigation
+                - text: ": Open URLs, go back/forward, reload pages."
+              - listitem [ref=e143]:
+                - strong [ref=e144]: Clicking and typing
+                - text: ": Click elements, type text, fill forms, select dropdowns."
+              - listitem [ref=e145]:
+                - strong [ref=e146]: Screenshots
+                - text: ": Capture the current page or specific elements for visual verification."
+              - listitem [ref=e147]:
+                - strong [ref=e148]: Keyboard and mouse
+                - text: ": Press keys, hover, drag and drop."
+              - listitem [ref=e149]:
+                - strong [ref=e150]: Dialogs
+                - text: ": Accept or dismiss browser dialogs."
+              - listitem [ref=e151]:
+                - strong [ref=e152]: Tabs
+                - text: ": Create, close, and switch between browser tabs."
+            - heading [level=3] [ref=e153]:
+              - text: Running Playwright code
+              - link "Direct link to Running Playwright code" [ref=e154] [cursor=pointer]:
+                - /url: "#running-playwright-code"
+                - text: "#"
+            - paragraph [ref=e155]:
+              - text: For complex interactions that go beyond individual tool calls, use the
+              - code [ref=e156]: browser_run_code_unsafe
+              - text: "tool to execute Playwright scripts directly. This tool runs arbitrary JavaScript in the Playwright server process and is RCE-equivalent — only enable it for trusted MCP clients:"
+            - code [ref=e160]:
+              - generic [ref=e161]: "Run this Playwright code to verify the todo count:"
+              - generic [ref=e162]: "async (page) => {"
+              - generic [ref=e163]: const count = await page.getByTestId('todo-count').textContent();
+              - generic [ref=e164]: return count;
+              - generic [ref=e165]: "}"
+            - heading [level=3] [ref=e166]:
+              - text: Network monitoring and mocking
+              - link "Direct link to Network monitoring and mocking" [ref=e167] [cursor=pointer]:
+                - /url: "#network-monitoring-and-mocking"
+                - text: "#"
+            - paragraph [ref=e168]: "Inspect network traffic and mock API responses:"
+            - list [ref=e169]:
+              - listitem [ref=e170]:
+                - strong [ref=e171]: View network requests
+                - text: ": List all requests made since page load."
+              - listitem [ref=e172]:
+                - strong [ref=e173]: Mock routes
+                - text: ": Set up URL pattern matching to return custom responses."
+              - listitem [ref=e174]:
+                - strong [ref=e175]: Console messages
+                - text: ": Access browser console output for debugging."
+            - heading [level=3] [ref=e176]:
+              - text: Storage state
+              - link "Direct link to Storage state" [ref=e177] [cursor=pointer]:
+                - /url: "#storage-state"
+                - text: "#"
+            - paragraph [ref=e178]: "Save and restore browser state including cookies and localStorage:"
+            - list [ref=e179]:
+              - listitem [ref=e180]:
+                - strong [ref=e181]: Save state
+                - text: ": Persist authentication and session data to a file."
+              - listitem [ref=e182]:
+                - strong [ref=e183]: Restore state
+                - text: ": Load previously saved state into a new session."
+              - listitem [ref=e184]:
+                - strong [ref=e185]: Cookie management
+                - text: ": List, get, set, and delete individual cookies."
+            - heading [level=2] [ref=e186]:
+              - text: Configuration
+              - link "Direct link to Configuration" [ref=e187] [cursor=pointer]:
+                - /url: "#configuration"
+                - text: "#"
+            - heading [level=3] [ref=e188]:
+              - text: Headed mode
+              - link "Direct link to Headed mode" [ref=e189] [cursor=pointer]:
+                - /url: "#headed-mode"
+                - text: "#"
+            - paragraph [ref=e190]: "By default, Playwright MCP runs the browser in headed mode so you can see what's happening. To run headless:"
+            - code [ref=e194]:
+              - generic [ref=e195]: "{"
+              - generic [ref=e196]: "\"mcpServers\": {"
+              - generic [ref=e197]: "\"playwright\": {"
+              - generic [ref=e198]: "\"command\": \"npx\","
+              - generic [ref=e199]: "\"args\": ["
+              - generic [ref=e200]: "\"@playwright/mcp@latest\","
+              - generic [ref=e201]: "\"--headless\""
+              - generic [ref=e202]: "]"
+              - generic [ref=e203]: "}"
+              - generic [ref=e204]: "}"
+              - generic [ref=e205]: "}"
+            - heading [level=3] [ref=e206]:
+              - text: Browser selection
+              - link "Direct link to Browser selection" [ref=e207] [cursor=pointer]:
+                - /url: "#browser-selection"
+                - text: "#"
+            - paragraph [ref=e208]: "Choose which browser to use:"
+            - code [ref=e212]:
+              - generic [ref=e213]: "{"
+              - generic [ref=e214]: "\"mcpServers\": {"
+              - generic [ref=e215]: "\"playwright\": {"
+              - generic [ref=e216]: "\"command\": \"npx\","
+              - generic [ref=e217]: "\"args\": ["
+              - generic [ref=e218]: "\"@playwright/mcp@latest\","
+              - generic [ref=e219]: "\"--browser=firefox\""
+              - generic [ref=e220]: "]"
+              - generic [ref=e221]: "}"
+              - generic [ref=e222]: "}"
+              - generic [ref=e223]: "}"
+            - paragraph [ref=e224]:
+              - text: "Supported values:"
+              - code [ref=e225]: chrome
+              - text: ","
+              - code [ref=e226]: firefox
+              - text: ","
+              - code [ref=e227]: webkit
+              - text: ","
+              - code [ref=e228]: msedge
+              - text: .
+            - heading [level=3] [ref=e229]:
+              - text: User profile
+              - link "Direct link to User profile" [ref=e230] [cursor=pointer]:
+                - /url: "#user-profile"
+                - text: "#"
+            - paragraph [ref=e231]: "Playwright MCP supports three profile modes:"
+            - list [ref=e232]:
+              - listitem [ref=e233]:
+                - strong [ref=e234]: Persistent (default)
+                - text: ": Login state and cookies are preserved between sessions. The profile is stored in"
+                - code [ref=e235]: "ms-playwright/mcp-{channel}-{workspace-hash}"
+                - text: in your platform's cache directory, so different projects get separate profiles automatically. Override with
+                - code [ref=e236]: "--user-data-dir"
+                - text: .
+              - listitem [ref=e237]:
+                - strong [ref=e238]: Isolated
+                - text: ": Each session starts fresh. Pass"
+                - code [ref=e239]: "--isolated"
+                - text: to enable. You can load initial state with
+                - code [ref=e240]: "--storage-state"
+                - text: .
+              - listitem [ref=e241]:
+                - strong [ref=e242]: Browser extension
+                - text: ": Connect to your existing browser tabs with the"
+                - link "Playwright Extension" [ref=e243] [cursor=pointer]:
+                  - /url: https://github.com/microsoft/playwright/blob/main/packages/extension/README.md
+                - text: . Pass
+                - code [ref=e244]: "--extension"
+                - text: to enable.
+            - heading [level=3] [ref=e245]:
+              - text: Configuration file
+              - link "Direct link to Configuration file" [ref=e246] [cursor=pointer]:
+                - /url: "#configuration-file"
+                - text: "#"
+            - paragraph [ref=e247]: "For advanced configuration, use a JSON config file:"
+            - code [ref=e251]:
+              - generic [ref=e252]: npx @playwright/mcp@latest --config path/to/config.json
+            - paragraph [ref=e253]:
+              - text: The config file supports browser options, context options, network rules, timeouts, and more. See the
+              - link "Playwright MCP repository" [ref=e254] [cursor=pointer]:
+                - /url: https://github.com/microsoft/playwright-mcp/blob/main/config.d.ts
+              - text: for the full schema.
+            - heading [level=3] [ref=e255]:
+              - text: Standalone server
+              - link "Direct link to Standalone server" [ref=e256] [cursor=pointer]:
+                - /url: "#standalone-server"
+                - text: "#"
+            - paragraph [ref=e257]: "When running a headed browser on a system without a display or from IDE worker processes, start the MCP server separately with HTTP transport:"
+            - code [ref=e261]:
+              - generic [ref=e262]: npx @playwright/mcp@latest --port 8931
+            - paragraph [ref=e263]: "Then point your MCP client to the HTTP endpoint:"
+            - code [ref=e267]:
+              - generic [ref=e268]: "{"
+              - generic [ref=e269]: "\"mcpServers\": {"
+              - generic [ref=e270]: "\"playwright\": {"
+              - generic [ref=e271]: "\"url\": \"http://localhost:8931/mcp\""
+              - generic [ref=e272]: "}"
+              - generic [ref=e273]: "}"
+              - generic [ref=e274]: "}"
+            - heading [level=2] [ref=e275]:
+              - text: Quick Reference
+              - link "Direct link to Quick Reference" [ref=e276] [cursor=pointer]:
+                - /url: "#quick-reference"
+                - text: "#"
+            - table [ref=e277]:
+              - rowgroup [ref=e278]:
+                - row [ref=e279]:
+                  - columnheader "Action" [ref=e280]
+                  - columnheader "How to do it" [ref=e281]
+              - rowgroup [ref=e282]:
+                - row [ref=e283]:
+                  - cell [ref=e284]:
+                    - strong [ref=e285]: Install server
+                  - cell "Add standard config to your MCP client" [ref=e286]
+                - row [ref=e287]:
+                  - cell [ref=e288]:
+                    - strong [ref=e289]: Navigate to a page
+                  - cell [ref=e290]:
+                    - text: "Ask: \"Go to"
+                    - link "https://example.com" [ref=e291] [cursor=pointer]:
+                      - /url: https://example.com
+                    - text: "\""
+                - row [ref=e292]:
+                  - cell [ref=e293]:
+                    - strong [ref=e294]: Click an element
+                  - 'cell "Ask: \"Click the Submit button\"" [ref=e295]'
+                - row [ref=e296]:
+                  - cell [ref=e297]:
+                    - strong [ref=e298]: Fill a form
+                  - cell [ref=e299]:
+                    - text: "Ask: \"Fill in the email field with"
+                    - link "test@example.com" [ref=e300] [cursor=pointer]:
+                      - /url: mailto:test@example.com
+                    - text: "\""
+                - row [ref=e301]:
+                  - cell [ref=e302]:
+                    - strong [ref=e303]: Take a screenshot
+                  - 'cell "Ask: \"Take a screenshot of the page\"" [ref=e304]'
+                - row [ref=e305]:
+                  - cell [ref=e306]:
+                    - strong [ref=e307]: Run Playwright code
+                  - 'cell "Ask: \"Run this Playwright code: ...\"" [ref=e308]'
+                - row [ref=e309]:
+                  - cell [ref=e310]:
+                    - strong [ref=e311]: Mock an API
+                  - 'cell "Ask: \"Mock the /api/users endpoint to return ...\"" [ref=e312]'
+                - row [ref=e313]:
+                  - cell [ref=e314]:
+                    - strong [ref=e315]: Use headed mode
+                  - cell [ref=e316]:
+                    - text: Default. Pass
+                    - code [ref=e317]: "--headless"
+                    - text: to disable
+                - row [ref=e318]:
+                  - cell [ref=e319]:
+                    - strong [ref=e320]: Choose a browser
+                  - cell [ref=e321]:
+                    - text: Pass
+                    - code [ref=e322]: "--browser=firefox"
+                    - text: in args
+            - heading [level=2] [ref=e323]:
+              - text: What's Next
+              - link "Direct link to What's Next" [ref=e324] [cursor=pointer]:
+                - /url: "#whats-next"
+                - text: "#"
+            - list [ref=e325]:
+              - listitem [ref=e326]:
+                - link "Write tests using web-first assertions, page fixtures, and locators" [ref=e327] [cursor=pointer]:
+                  - /url: /docs/writing-tests
+              - listitem [ref=e328]:
+                - link "Run your tests on CI" [ref=e329] [cursor=pointer]:
+                  - /url: /docs/ci-intro
+              - listitem [ref=e330]:
+                - link "Learn more about the Trace Viewer" [ref=e331] [cursor=pointer]:
+                  - /url: /docs/trace-viewer
+        - navigation "Docs pages"
+      - list [ref=e334]:
+        - listitem [ref=e335]:
+          - link "Introduction" [ref=e336] [cursor=pointer]:
+            - /url: "#introduction"
+        - listitem [ref=e337]:
+          - link "Prerequisites" [ref=e338] [cursor=pointer]:
+            - /url: "#prerequisites"
+        - listitem [ref=e339]:
+          - link "Getting Started" [ref=e340] [cursor=pointer]:
+            - /url: "#getting-started"
+          - list [ref=e341]:
+            - listitem [ref=e342]:
+              - link "Installation" [ref=e343] [cursor=pointer]:
+                - /url: "#installation"
+            - listitem [ref=e344]:
+              - link "First interaction" [ref=e345] [cursor=pointer]:
+                - /url: "#first-interaction"
+        - listitem [ref=e346]:
+          - link "Core Features" [ref=e347] [cursor=pointer]:
+            - /url: "#core-features"
+          - list [ref=e348]:
+            - listitem [ref=e349]:
+              - link "Accessibility snapshots" [ref=e350] [cursor=pointer]:
+                - /url: "#accessibility-snapshots"
+            - listitem [ref=e351]:
+              - link "Interacting with pages" [ref=e352] [cursor=pointer]:
+                - /url: "#interacting-with-pages"
+            - listitem [ref=e353]:
+              - link "Running Playwright code" [ref=e354] [cursor=pointer]:
+                - /url: "#running-playwright-code"
+            - listitem [ref=e355]:
+              - link "Network monitoring and mocking" [ref=e356] [cursor=pointer]:
+                - /url: "#network-monitoring-and-mocking"
+            - listitem [ref=e357]:
+              - link "Storage state" [ref=e358] [cursor=pointer]:
+                - /url: "#storage-state"
+        - listitem [ref=e359]:
+          - link "Configuration" [ref=e360] [cursor=pointer]:
+            - /url: "#configuration"
+          - list [ref=e361]:
+            - listitem [ref=e362]:
+              - link "Headed mode" [ref=e363] [cursor=pointer]:
+                - /url: "#headed-mode"
+            - listitem [ref=e364]:
+              - link "Browser selection" [ref=e365] [cursor=pointer]:
+                - /url: "#browser-selection"
+            - listitem [ref=e366]:
+              - link "User profile" [ref=e367] [cursor=pointer]:
+                - /url: "#user-profile"
+            - listitem [ref=e368]:
+              - link "Configuration file" [ref=e369] [cursor=pointer]:
+                - /url: "#configuration-file"
+            - listitem [ref=e370]:
+              - link "Standalone server" [ref=e371] [cursor=pointer]:
+                - /url: "#standalone-server"
+        - listitem [ref=e372]:
+          - link "Quick Reference" [ref=e373] [cursor=pointer]:
+            - /url: "#quick-reference"
+        - listitem [ref=e374]:
+          - link "What's Next" [ref=e375] [cursor=pointer]:
+            - /url: "#whats-next"
+  - contentinfo [ref=e376]:
+    - generic [ref=e377]:
+      - generic [ref=e378]:
+        - generic [ref=e379]:
+          - generic [ref=e380]: Learn
+          - list [ref=e381]:
+            - listitem [ref=e382]:
+              - link "Getting started" [ref=e383] [cursor=pointer]:
+                - /url: /docs/intro
+            - listitem [ref=e384]:
+              - link [ref=e385] [cursor=pointer]:
+                - /url: https://learn.microsoft.com/en-us/training/modules/build-with-playwright/
+                - text: Playwright Training
+                - img "(opens in new tab)" [ref=e386]
+            - listitem [ref=e388]:
+              - link "Learn Videos" [ref=e389] [cursor=pointer]:
+                - /url: /community/learn-videos
+            - listitem [ref=e390]:
+              - link "Feature Videos" [ref=e391] [cursor=pointer]:
+                - /url: /community/feature-videos
+        - generic [ref=e392]:
+          - generic [ref=e393]: Community
+          - list [ref=e394]:
+            - listitem [ref=e395]:
+              - link [ref=e396] [cursor=pointer]:
+                - /url: https://stackoverflow.com/questions/tagged/playwright
+                - text: Stack Overflow
+                - img "(opens in new tab)" [ref=e397]
+            - listitem [ref=e399]:
+              - link [ref=e400] [cursor=pointer]:
+                - /url: https://aka.ms/playwright/discord
+                - text: Discord
+                - img "(opens in new tab)" [ref=e401]
+            - listitem [ref=e403]:
+              - link [ref=e404] [cursor=pointer]:
+                - /url: https://x.com/playwrightweb
+                - text: X
+                - img "(opens in new tab)" [ref=e405]
+            - listitem [ref=e407]:
+              - link [ref=e408] [cursor=pointer]:
+                - /url: https://www.linkedin.com/company/playwrightweb
+                - text: LinkedIn
+                - img "(opens in new tab)" [ref=e409]
+        - generic [ref=e411]:
+          - generic [ref=e412]: More
+          - list [ref=e413]:
+            - listitem [ref=e414]:
+              - link [ref=e415] [cursor=pointer]:
+                - /url: https://github.com/microsoft/playwright
+                - text: GitHub
+                - img "(opens in new tab)" [ref=e416]
+            - listitem [ref=e418]:
+              - link [ref=e419] [cursor=pointer]:
+                - /url: https://www.youtube.com/channel/UC46Zj8pDH5tDosqm1gd7WTg
+                - text: YouTube
+                - img "(opens in new tab)" [ref=e420]
+            - listitem [ref=e422]:
+              - link [ref=e423] [cursor=pointer]:
+                - /url: https://dev.to/playwright
+                - text: Blog
+                - img "(opens in new tab)" [ref=e424]
+            - listitem [ref=e426]:
+              - link "Ambassadors" [ref=e427] [cursor=pointer]:
+                - /url: /community/ambassadors
+            - listitem [ref=e428]:
+              - link [ref=e429] [cursor=pointer]:
+                - /url: https://go.microsoft.com/fwlink/?LinkId=521839
+                - text: Microsoft Privacy Statement
+                - img "(opens in new tab)" [ref=e430]
+      - generic [ref=e432]: Copyright © 2026 Microsoft
