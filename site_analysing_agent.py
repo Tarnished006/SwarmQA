@@ -1,7 +1,7 @@
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field,Annotated
-from typing import List, TypedDict
-from mcp_logic import mcp
+from pydantic import BaseModel, Field
+from typing import List, TypedDict,Annotated
+from mcp_logic import main as mcp
 from langgraph.graph.message import add_messages
 from langchain_core.prompts import ChatPromptTemplate
 

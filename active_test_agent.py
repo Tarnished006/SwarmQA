@@ -8,7 +8,7 @@ import tarfile
 from typing import List, Literal
 from urllib.parse import urlparse
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_classic.agents import AgentExecutor, create_tool_calling_agent   
 import docker
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field

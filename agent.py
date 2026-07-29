@@ -14,7 +14,7 @@ import re
 import tarfile
 import docker
 from urllib.parse import urlparse
-from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_classic.agents import AgentExecutor, create_tool_calling_agent   
 from langchain_core.tools import tool
 import json
 import tempfile
@@ -39,7 +39,7 @@ class Selector(TypedDict):
     test_results:List[str]
     verification_report:List[str]
     next: str
-# ── 5. THE MULTI-AGENT SUPERVISOR ────────────────────────────────
+
 class SupervisorDecision(BaseModel):
     next_node: Literal["Recon_Team", "Red_Team", "Blue_Team", "FINISH"] = Field(
         description="The next specialized team to route the task to, or FINISH if the pipeline is secure."
