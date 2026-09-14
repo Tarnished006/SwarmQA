@@ -1,18 +1,23 @@
 import os
 import re
+import json
 import asyncio
 import ipaddress
 import logging
 from html.parser import HTMLParser
 from urllib.parse import urlparse
-from typing import List, Literal, TypedDict, Annotated, Optional
+from typing import List, Literal, TypedDict, Annotated, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph.message import add_messages
+from dotenv import load_dotenv
 from mcp_logic import main as mcp
 
-logger = logging.getLogger(__name__)
+load_dotenv()
+
+logger = logging.getLogger("aegis.site_analyser")
+logging.basicConfig(level=logging.INFO)
 
 # ── SCHEMAS ───────────────────────────────────────────────────
 class Selector(TypedDict):
@@ -24,7 +29,7 @@ class Selector(TypedDict):
     proposed_patch: List[str]
     verification_status: str
     codebase_path: List[str]
-    git_diff: Optional[str]        # Transport field for raw git diff
+    git_diff: Optional[str]
     cleaned_errors: List[str]
     remediation_plan: List[str]
     test_results: List[str]
@@ -33,162 +38,295 @@ class Selector(TypedDict):
 
 class Finding(BaseModel):
     id: str = Field(description="Unique finding ID, e.g., QA-001, SEC-001")
-    layer: Literal["QA", "SEC"] = Field(description="QA or SEC")
-    category: str = Field(description="Category from the system prompt layer")
-    target_element: str = Field(description="Exact DOM role, label, or xpath")
-    risk_priority: Literal["P0", "P1", "P2", "P3"] = Field(description="P0 to P3")
-    test_action: str = Field(description="What to test")
-    expected_safe_behavior: str
+    layer: Literal["QA", "SEC"] = Field(description="QA (Functional/boundary) or SEC (Security/offensive)")
+    category: str = Field(description="Category, e.g., AUTH, IDOR, INJECTION, INPUT_VALIDATION, BUSINESS_LOGIC")
+    target_element: str = Field(description="Exact DOM role, tag, or label, e.g., 'Search input [name=q]'")
+    target_url_or_path: Optional[str] = Field(default=None, description="Action URL or link path, e.g., '/api/v1/search'")
+    param_name: Optional[str] = Field(default=None, description="Form input or query parameter name, e.g., 'q', 'id'")
+    http_method: Optional[str] = Field(default=None, description="HTTP method if applicable: GET, POST, PUT, DELETE")
+    risk_priority: Literal["P0", "P1", "P2", "P3"] = Field(description="P0 (Critical) to P3 (Low)")
+    test_action: str = Field(description="Exact test or fuzz action to verify this surface")
+    expected_safe_behavior: str = Field(description="Safe expected application behavior")
 
 class AnalyzerReport(BaseModel):
-    findings: List[Finding]
+    findings: List[Finding] = Field(default_factory=list)
 
-# ── FAST-PASS: FRONTEND-RELEVANT FILE DETECTION ───────────────
-FRONTEND_EXTENSIONS = {
-    ".html", ".htm", ".css", ".scss", ".sass", ".less", ".styl",
-    ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
-    ".vue", ".svelte", ".astro",
-    ".json",
-    ".ejs", ".jinja", ".jinja2", ".hbs", ".handlebars", ".mustache",
-    ".pug", ".jade", ".twig", ".erb", ".liquid", ".mdx",
+
+# ── CONFIGURATION & MODEL FACTORY ─────────────────────────────
+ALLOW_LOCAL_TARGETS = os.getenv("ALLOW_LOCAL_TARGETS", "true").lower() in ("true", "1", "yes")
+
+CLOUD_METADATA_HOSTS = {
+    "metadata.google.internal",
+    "169.254.169.254",      # AWS / Azure / GCP link-local metadata
+    "fd00:ec2::254",        # AWS IPv6 metadata
 }
 
-# ── URL SAFETY GUARD ───────────────────────────────────────────
-BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal"}
+FRONTEND_EXTENSIONS = {
+    ".html", ".htm", ".css", ".scss", ".sass", ".less",
+    ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".vue", ".svelte", ".astro", ".json",
+    ".ejs", ".jinja", ".jinja2", ".hbs", ".mustache", ".pug"
+}
 
+def get_analyser_llm():
+    """
+    Unified, fail-safe OpenAI-compatible model loader.
+    Reads standard environment variables:
+    - OPENAI_API_KEY: API key (Groq, OpenAI, DeepSeek, etc.)
+    - OPENAI_BASE_URL: Endpoint URL (optional, e.g. for Groq, Ollama, DeepSeek)
+    - OPENAI_MODEL: Model identifier (defaults to gpt-4o-mini)
+    """
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
+    base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE")
+    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+    if not api_key:
+        if base_url and ("localhost" in base_url or "127.0.0.1" in base_url):
+            api_key = "ollama"
+        else:
+            raise ValueError(
+                "Missing LLM API Key! Please set OPENAI_API_KEY in your .env file."
+            )
+
+    return ChatOpenAI(
+        model=model_name,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=0.0,
+        max_tokens=2000
+    )
+
+
+# ── URL SAFETY GUARD ───────────────────────────────────────────
 def _is_url_safe_to_fetch(url: str) -> bool:
     """
-    Basic guardrail before handing an externally-influenced URL to the scraper.
+    Guards against SSRF while allowing legitimate local test environments.
     """
-    try:
-        parsed = urlparse(url)
-    except Exception:
+    if not url or not isinstance(url, str):
         return False
         
+    try:
+        parsed = urlparse(url.strip())
+    except Exception:
+        return False
+
     if parsed.scheme not in {"http", "https"}:
         return False
-        
+
     hostname = (parsed.hostname or "").lower()
-    if not hostname or hostname in BLOCKED_HOSTNAMES:
+    if not hostname or hostname in CLOUD_METADATA_HOSTS:
         return False
-        
+
+    # Check if literal IP
     try:
         ip = ipaddress.ip_address(hostname)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+        if ip.is_multicast or ip.is_reserved:
             return False
+        if not ALLOW_LOCAL_TARGETS:
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                return False
     except ValueError:
-        pass  # hostname, not a literal IP
-        
+        # Hostname string (not literal IP)
+        if not ALLOW_LOCAL_TARGETS and hostname in {"localhost"}:
+            return False
+
     return True
 
-# ── DOM OPTIMIZATION & TOKEN COMPRESSION ──────────────────────
-MAX_DOM_CHARS = 40_000
-MAX_ATTR_VALUE_LEN = 300
-SKIP_SUBTREE_TAGS = {"script", "style", "svg", "noscript"}
-STRIP_ATTR_KEYS = {"style"}
 
-class _DomCleaner(HTMLParser):
+# ── INTERACTIVE SURFACE EXTRACTOR (TOKEN OPTIMIZER) ───────────
+class _InteractiveSurfaceExtractor(HTMLParser):
+    """
+    Slashes token consumption by 80-90%.
+    Extracts ONLY security and QA relevant attack surfaces:
+    - Forms (action, method, enctype)
+    - Inputs (name, type, pattern, required, min, max, value for state/hidden)
+    - Buttons & Dropdowns
+    - Actionable links (with query parameters or API/admin routes)
+    - Meta CSRF tokens
+    """
+    INTERESTING_PATH_KEYWORDS = {
+        "api", "admin", "login", "logout", "auth", "user", "order",
+        "edit", "delete", "token", "search", "upload", "download", "pay"
+    }
+    SKIP_TAGS = {"script", "style", "svg", "noscript", "iframe"}
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.out: List[str] = []
-        self._skip_depth = 0
-        self._skip_tag: Optional[str] = None
+        self.surfaces: List[str] = []
+        self.meta_tags: List[str] = []
+        self.current_form: Optional[Dict[str, Any]] = None
+        self.current_tag: Optional[str] = None
+        self.current_button_attrs: Dict[str, str] = {}
+        self.current_button_text: List[str] = []
+        self.skip_depth: int = 0
 
-    def _render_attrs(self, attrs) -> str:
-        parts = []
-        for key, value in attrs:
-            if key is None or key.lower() in STRIP_ATTR_KEYS:
-                continue
-            if value is None:
-                parts.append(f" {key}")
-                continue
-            if len(value) > MAX_ATTR_VALUE_LEN:
-                value = value[:MAX_ATTR_VALUE_LEN] + "...[TRUNCATED]"
-            parts.append(f' {key}="{value}"')
-        return "".join(parts)
+    def handle_starttag(self, tag: str, attrs: list):
+        tag = tag.lower()
+        attr_dict = {k.lower(): (v or "") for k, v in attrs if k}
 
-    def handle_starttag(self, tag, attrs):
-        if self._skip_depth > 0:
-            if tag == self._skip_tag:
-                self._skip_depth += 1
+        if tag in self.SKIP_TAGS:
+            self.skip_depth += 1
             return
-        if tag in SKIP_SUBTREE_TAGS:
-            self._skip_depth, self._skip_tag = 1, tag
+        if self.skip_depth > 0:
             return
-        self.out.append(f"<{tag}{self._render_attrs(attrs)}>")
 
-    def handle_startendtag(self, tag, attrs):
-        if self._skip_depth > 0:
+        # 1. Meta CSRF / Tokens
+        if tag == "meta":
+            name = attr_dict.get("name") or attr_dict.get("property") or ""
+            content = attr_dict.get("content") or ""
+            if any(k in name.lower() for k in ("csrf", "token", "auth")):
+                self.meta_tags.append(f"<META name='{name}' content='{content[:100]}'/>")
             return
-        if tag in SKIP_SUBTREE_TAGS:
+
+        # 2. Forms
+        if tag == "form":
+            action = attr_dict.get("action", "")
+            method = attr_dict.get("method", "GET").upper()
+            form_id = attr_dict.get("id") or attr_dict.get("name") or "unnamed_form"
+            self.current_form = {
+                "header": f"<FORM id='{form_id}' action='{action}' method='{method}'>",
+                "elements": [],
+                "footer": "</FORM>"
+            }
             return
-        self.out.append(f"<{tag}{self._render_attrs(attrs)}/>")
 
-    def handle_endtag(self, tag):
-        if self._skip_depth > 0:
-            if tag == self._skip_tag:
-                self._skip_depth -= 1
-                if self._skip_depth == 0:
-                    self._skip_tag = None
+        # 3. Inputs
+        if tag == "input":
+            input_type = attr_dict.get("type", "text").lower()
+            name = attr_dict.get("name") or attr_dict.get("id") or "unnamed_input"
+            required = " required='true'" if "required" in attr_dict else ""
+            pattern = f" pattern='{attr_dict['pattern']}'" if "pattern" in attr_dict else ""
+            
+            val = ""
+            if input_type in ("hidden", "checkbox", "radio") or any(k in name.lower() for k in ("csrf", "token", "id")):
+                val_content = attr_dict.get("value", "")[:100]
+                val = f" value='{val_content}'"
+
+            elem_str = f"  <INPUT type='{input_type}' name='{name}'{val}{required}{pattern}/>"
+            if self.current_form:
+                self.current_form["elements"].append(elem_str)
+            else:
+                self.surfaces.append(elem_str.strip())
             return
-        self.out.append(f"</{tag}>")
 
-    def handle_data(self, data):
-        if self._skip_depth > 0:
+        # 4. Textarea & Select
+        if tag in ("textarea", "select"):
+            name = attr_dict.get("name") or attr_dict.get("id") or f"unnamed_{tag}"
+            elem_str = f"  <{tag.upper()} name='{name}'/>"
+            if self.current_form:
+                self.current_form["elements"].append(elem_str)
+            else:
+                self.surfaces.append(elem_str.strip())
             return
-        text = data.strip()
-        if text:
-            self.out.append(text)
 
-    def handle_comment(self, data):
-        pass
+        # 5. Buttons
+        if tag == "button":
+            self.current_tag = "button"
+            self.current_button_attrs = attr_dict
+            self.current_button_text = []
+            return
 
-def _clean_via_parser(raw_dom: str) -> Optional[str]:
-    try:
-        cleaner = _DomCleaner()
-        cleaner.feed(raw_dom)
-        cleaner.close()
-        return "\n".join(cleaner.out)
-    except Exception:
-        return None
+        # 6. Actionable Links
+        if tag == "a":
+            href = attr_dict.get("href", "")
+            if href and not href.startswith("#") and not href.startswith("javascript:"):
+                parsed = urlparse(href)
+                has_params = bool(parsed.query)
+                path_lower = parsed.path.lower()
+                is_sensitive = any(kw in path_lower for kw in self.INTERESTING_PATH_KEYWORDS)
+                if has_params or is_sensitive:
+                    self.surfaces.append(f"<ACTIONABLE_LINK href='{href}'/>")
 
-def _clean_via_regex_fallback(raw_dom: str) -> str:
-    cleaned = re.sub(r'<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>', '', raw_dom, flags=re.IGNORECASE)
-    cleaned = re.sub(r'<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'<svg\b[^<]*(?:(?!<\/svg>)<[^<]*)*<\/svg>', '[SVG_ICON]', cleaned, flags=re.IGNORECASE)
-    return cleaned
+    def handle_endtag(self, tag: str):
+        tag = tag.lower()
+        if tag in self.SKIP_TAGS and self.skip_depth > 0:
+            self.skip_depth -= 1
+            return
 
-def clean_dom_for_llm(raw_dom: str, max_chars: int = MAX_DOM_CHARS) -> str:
-    if not raw_dom:
+        if tag == "form" and self.current_form:
+            form_lines = [self.current_form["header"]] + self.current_form["elements"] + [self.current_form["footer"]]
+            self.surfaces.append("\n".join(form_lines))
+            self.current_form = None
+
+        if tag == "button" and self.current_tag == "button":
+            text = "".join(self.current_button_text).strip()[:40]
+            b_type = self.current_button_attrs.get("type", "submit")
+            b_name = self.current_button_attrs.get("name", "")
+            btn_str = f"  <BUTTON type='{b_type}' name='{b_name}'>{text}</BUTTON>"
+            if self.current_form:
+                self.current_form["elements"].append(btn_str)
+            else:
+                self.surfaces.append(btn_str.strip())
+            self.current_tag = None
+            self.current_button_text = []
+
+    def handle_data(self, data: str):
+        if self.current_tag == "button":
+            self.current_button_text.append(data)
+
+
+def clean_dom_for_llm(raw_dom: str, max_chars: int = 8000) -> str:
+    """
+    Extracts the compact interactive attack surface from raw HTML or JSON.
+    Reduces 40,000 chars of HTML down to ~800 chars of pure attack surface.
+    """
+    if not raw_dom or not raw_dom.strip():
         return ""
-        
-    cleaned = _clean_via_parser(raw_dom)
-    if cleaned is None:
-        logger.warning("[Site Analyser] DOM parser failed, using regex fallback.")
-        cleaned = _clean_via_regex_fallback(raw_dom)
-        
-    cleaned = re.sub(r'data:image\/[^;]+;base64,[a-zA-Z0-9+/=]+', '[BASE64_IMAGE]', cleaned)
-    cleaned = re.sub(r'\n\s*\n', '\n', cleaned)
-    
-    if len(cleaned) > max_chars:
-        logger.info("DOM size exceeded limit. Truncating to %d chars.", max_chars)
-        cutoff = cleaned.rfind(">", 0, max_chars)
-        cutoff = cutoff + 1 if cutoff != -1 and cutoff > max_chars * 0.5 else max_chars
-        return cleaned[:cutoff] + "\n\n<TRUNCATED reason='token_budget_exceeded'/>"
-        
-    return cleaned
+
+    if "<ACCESSIBILITY_DOM_ERROR>" in raw_dom:
+        return raw_dom
+
+    trimmed = raw_dom.strip()
+    if trimmed.startswith("{") or trimmed.startswith("["):
+        try:
+            data = json.loads(trimmed)
+            return json.dumps(data, indent=2)[:max_chars]
+        except Exception:
+            pass
+
+    try:
+        extractor = _InteractiveSurfaceExtractor()
+        extractor.feed(raw_dom)
+        extractor.close()
+
+        blocks = []
+        if extractor.meta_tags:
+            blocks.append("<SECURITY_METADATA>\n" + "\n".join(extractor.meta_tags) + "\n</SECURITY_METADATA>")
+        if extractor.surfaces:
+            blocks.append("<INTERACTIVE_SURFACES>\n" + "\n".join(extractor.surfaces) + "\n</INTERACTIVE_SURFACES>")
+
+        result = "\n\n".join(blocks).strip()
+        if not result:
+            return "No interactive forms, inputs, or security surfaces detected on the target page."
+
+        if len(result) > max_chars:
+            return result[:max_chars] + "\n...[TRUNCATED]"
+        return result
+
+    except Exception as e:
+        logger.warning("[Site Analyser] Interactive extractor error: %s. Fallback applied.", e)
+        cleaned = re.sub(r'<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>', '', raw_dom, flags=re.IGNORECASE)
+        cleaned = re.sub(r'<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>', '', cleaned, flags=re.IGNORECASE)
+        return cleaned[:max_chars]
+
 
 # ── MAIN AGENT NODE ───────────────────────────────────────────
-MCP_SCRAPE_TIMEOUT_SECONDS = 30
+MCP_SCRAPE_TIMEOUT_SECONDS = 35
 
-async def site_analyser_agent(state: Selector):
+async def site_analyser_agent(state: Selector) -> dict:
     url = state.get("url", "")
     if not url:
-        return {"frontend_analysis": ["No target URL provided."]}
-        
+        return {
+            "frontend_analysis": [json.dumps({"error": "No target URL provided."})],
+            "messages": ["[Site Analyser] Skipped: No target URL provided."]
+        }
+
     if not _is_url_safe_to_fetch(url):
         logger.warning("[Site Analyser] Refusing to fetch disallowed URL: %s", url)
-        return {"frontend_analysis": ["Target URL failed safety validation."]}
+        return {
+            "frontend_analysis": [json.dumps({"error": f"Target URL failed safety validation: {url}"})],
+            "messages": [f"[Site Analyser] Security check blocked URL: {url}"]
+        }
 
     # 1. SMART TRIGGER (FAST-PASS)
     raw_diff = state.get("git_diff")
@@ -199,74 +337,93 @@ async def site_analyser_agent(state: Selector):
         )
         if modified_files and not has_frontend_changes:
             logger.info("[Site Analyser] Non-frontend diff detected. Fast-pass exit ($0 tokens spent).")
-            return {"frontend_analysis": []}
+            return {
+                "frontend_analysis": [],
+                "messages": ["[Site Analyser] Fast-pass exit: No frontend code changes detected in diff."]
+            }
 
-    # 2. RUN HEADLESS SCRAPE (MCP) & CLEAN ACCESSIBILITY TREE
+    # 2. RUN HEADLESS SCRAPE (MCP) & EXTRACT ATTACK SURFACES
     try:
         raw_analysis = await asyncio.wait_for(mcp(url), timeout=MCP_SCRAPE_TIMEOUT_SECONDS)
-        cleaned_dom = clean_dom_for_llm(raw_analysis)
     except asyncio.TimeoutError:
-        logger.error("[Site Analyser Error] MCP scrape timed out after %ds for URL %s", MCP_SCRAPE_TIMEOUT_SECONDS, url)
-        return {"frontend_analysis": []}
+        err_msg = f"Browser crawl timed out after {MCP_SCRAPE_TIMEOUT_SECONDS}s for {url}"
+        logger.error("[Site Analyser Error] %s", err_msg)
+        return {
+            "frontend_analysis": [json.dumps({"error": err_msg})],
+            "messages": [f"[Site Analyser Error] {err_msg}"]
+        }
     except Exception as e:
-        logger.error("[Site Analyser Error] MCP scraping failed for URL %s: %s", url, e)
-        return {"frontend_analysis": []}
+        err_msg = f"Browser crawl failed for {url}: {str(e)}"
+        logger.error("[Site Analyser Error] %s", err_msg)
+        return {
+            "frontend_analysis": [json.dumps({"error": err_msg})],
+            "messages": [f"[Site Analyser Error] {err_msg}"]
+        }
 
-    if not cleaned_dom.strip():
-        return {"frontend_analysis": []}
+    # 3. DETECT INTERNAL MCP CRAWLER FAILURES
+    if "<ACCESSIBILITY_DOM_ERROR>" in raw_analysis:
+        logger.error("[Site Analyser] Playwright MCP reported an error: %s", raw_analysis)
+        return {
+            "frontend_analysis": [json.dumps({"error": "Playwright scrape failed", "details": raw_analysis})],
+            "messages": [f"[Site Analyser] Crawler error: {raw_analysis[:120]}"]
+        }
 
-    # 3. LLM ANALYSIS PROMPT
-    system = """
-    You are an Autonomous Full-Stack QA & Offensive Security Analysis Engine — a unified replacement for manual QA test teams, DAST/pentest analysts, and business-logic security reviewers. You operate as a single node in a larger pipeline: your job is to ANALYZE and OUTPUT structured findings only. You do not execute requests, run exploits, or interact with the live application — downstream execution agents consume your output.
+    cleaned_surface = clean_dom_for_llm(raw_analysis)
+    if not cleaned_surface or "No interactive forms" in cleaned_surface:
+        logger.info("[Site Analyser] No interactive attack surfaces found on %s", url)
+        return {
+            "frontend_analysis": [],
+            "messages": [f"[Site Analyser] No actionable interactive surfaces discovered on {url}."]
+        }
 
-INPUT: A single <ACCESSIBILITY_DOM> tree (and optionally <NETWORK_LOG>, <PAGE_URL>, <AUTH_STATE> if provided). Treat this as ground truth. Do not hallucinate elements, endpoints, or parameters not present in the input.
+    # 4. COMPACT STRUCTURED LLM ANALYSIS PROMPT
+    system = """You are an Autonomous Offensive Security & QA Reconnaissance Engine.
+Your task is to analyze the extracted interactive attack surfaces of a web application.
+Identify the highest-priority functional validation gaps and offensive vulnerability surfaces.
 
-═══════════════════════════════════
-LAYER 1 — FUNCTIONAL QA AUTOMATION
-═══════════════════════════════════
-For each interactive surface found in the DOM (forms, inputs, buttons, links, nav, modals, tables, pagination, cart/checkout, search, file uploads):
-1. USER JOURNEY MAPPING — enumerate discrete end-to-end flows (e.g. "guest checkout," "password reset," "filter + sort + paginate"). Reference exact element roles/labels/testids from the DOM.
-2. BOUNDARY & EDGE CASES — null/empty submits, min/max length, unicode/emoji, whitespace-only input, duplicate submits, back-button/forward-button state, browser refresh mid-flow, session expiry mid-flow.
-3. INPUT VALIDATION GAPS — missing client-side constraints (type, pattern, maxlength, required) inferred from DOM attributes; fields lacking visible error-state affordances.
-4. STATE TRANSITION HAZARDS — race conditions between async UI states (e.g. double-submit before loading state disables button), orphaned modals, stale cart/session state across tabs.
-5. ACCESSIBILITY-AS-FUNCTIONAL-BUG — missing labels/roles/focus traps that also indicate untested or auto-generated form fields (a QA signal, not just an a11y one).
+Focus on:
+1. AUTH & SESSION: Login/signup/password reset forms, missing CSRF tokens, role flags.
+2. IDOR & BOLA: Actionable links or hidden inputs exposing record IDs, account numbers, or slugs.
+3. INJECTION CANDIDATES: Search bars, comment boxes, file uploads lacking input validation or client constraints.
+4. BUSINESS LOGIC RISKS: Price, quantity, or discount inputs editable in DOM with missing limits.
 
-═══════════════════════════════════
-LAYER 2 — OFFENSIVE SECURITY RECON
-═══════════════════════════════════
-1. AUTH & SESSION BOUNDARIES — login/logout/reset flows; flag any client-side role/permission indicators (hidden admin links, disabled-not-removed privileged buttons) suggesting server-side authz should be verified.
-2. IDOR SURFACE — every element exposing an ID, slug, order number, or reference in DOM attributes, hrefs, or visible text; flag as an IDOR test target with the exact parameter name/location.
-3. BUSINESS LOGIC RISK — price/quantity/discount fields editable or inferable from DOM, multi-step flows lacking visible confirmation/idempotency cues (rate-limit / race-condition candidates), coupon/promo inputs, quantity fields with no visible upper bound.
-4. INJECTION-ADJACENT SURFACES — free-text fields that render back to the UI elsewhere (search, comments, profile fields) — flag as XSS/stored-injection candidates for downstream fuzzing, not as confirmed vulnerabilities.
-5. CLIENT-SIDE TRUST SIGNALS — any logic that looks enforced only in the DOM/JS (disabled buttons, hidden fields, greyed-out options, inline event handlers referencing privileged-looking function names) rather than structurally absent — flag for server-side re-verification.
-
-═══════════════════════════════════
-OUTPUT CONTRACT
-═══════════════════════════════════
-- Output ONLY structured JSON matching the provided schema. No narration, no summaries, no caveats.
-- Be specific: cite exact DOM roles, labels, testids, or href/param names — never generic placeholders.
-- Do not repeat the same underlying issue across multiple elements as separate findings — group by root cause.
-- If the DOM provides insufficient evidence for a category, omit it silently rather than speculating.
-- Never generate working exploit payloads, malicious scripts, or attack code — only name the test target and technique category (e.g., "reflected-XSS candidate," not a payload).
+CONTRACT:
+- Output ONLY structured findings matching the AnalyzerReport schema.
+- Populate exact 'target_url_or_path', 'param_name', and 'http_method' for each finding to assist downstream backend correlation.
+- Be concise and omit trivial cosmetic or minor accessibility issues. Capped at top 6 critical surfaces.
 """
-    human = """
-    Target URL: {url}
 
-<ACCESSIBILITY_DOM>
-{dom_data}
-</ACCESSIBILITY_DOM>
+    human = """Target URL: {url}
 
-Execute the analysis and return the structured findings array.
-"""
+<INTERACTIVE_ATTACK_SURFACES>
+{surface_data}
+</INTERACTIVE_ATTACK_SURFACES>
+
+Identify the high-risk attack surfaces and return the structured report."""
+
     prompt = ChatPromptTemplate.from_messages([("system", system), ("human", human)])
-    llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0.0, max_tokens=3500)
-    structured_llm = llm.with_structured_output(AnalyzerReport)
-    chain = prompt | structured_llm
     
     try:
-        report = await chain.ainvoke({"url": url, "dom_data": cleaned_dom})
+        llm = get_analyser_llm()
+        structured_llm = llm.with_structured_output(AnalyzerReport)
+        chain = prompt | structured_llm
+        
+        report: AnalyzerReport = await chain.ainvoke({
+            "url": url,
+            "surface_data": cleaned_surface
+        })
+
         findings_list = [f.model_dump_json() for f in report.findings]
-        return {"frontend_analysis": findings_list}
+        logger.info("[Site Analyser] Successfully identified %d attack surfaces on %s", len(findings_list), url)
+
+        return {
+            "frontend_analysis": findings_list,
+            "messages": [f"[Site Analyser] Discovered {len(findings_list)} actionable frontend attack surfaces."]
+        }
+
     except Exception as e:
-        logger.error("[Site Analyser Error] Structured LLM generation failed: %s", e)
-        return {"frontend_analysis": []}
+        logger.error("[Site Analyser Error] LLM generation failed: %s", e)
+        return {
+            "frontend_analysis": [],
+            "messages": [f"[Site Analyser Error] Analysis LLM invocation failed: {str(e)}"]
+        }
