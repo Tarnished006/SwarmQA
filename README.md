@@ -196,6 +196,7 @@ Discord/Slack Webhooks + Files]
 | **Remediation** | [`patch_agent.py`](patch_agent.py) | Unified LLM, AST matching | Synthesizes surgical code patches for confirmed bugs; escalates anomalies to humans. |
 | **Clean Room** | [`checking_agent.py`](checking_agent.py) | Docker, Pytest, DiffEngine | Applies patches with line-ending normalization, runs regression suites, gates deployment. |
 | **Threat Defense** | [`pipeline_guard.py`](pipeline_guard.py) | Regex, XML entity escaping | Neutralizes indirect prompt injections, tag breakouts, and context flooding attacks. |
+| **Deploy Agent** | [`deploy_agent.py`](deploy_agent.py) | `httpx`, `boto3`, REST, GraphQL | Cloud deployment triggers (Vercel, Render, Railway, AWS ECS), liveness polling, post-deploy smoke tests. |
 | **Alerting** | [`alerts.py`](alerts.py) | Webhooks (Discord/Slack), IO | Dispatches durable markdown audit files (`.aegis_alerts/`) and webhook notifications. |
 
 ---
@@ -263,6 +264,43 @@ The Supervisor node governs the LangGraph state machine. It prevents wasteful to
   * `READY_FOR_DEPLOYMENT`: All exploits neutralized, 0 regressions, all tests pass.
   * `BLOCKED`: Tests fail or code regressions introduced; reverts patch.
   * `PARTIAL_WITH_REVIEW`: Fix works locally but touched wide-radius business logic; requires developer sign-off.
+
+---
+
+### 5. Deployment Layer: Autonomous Deploy Agent (`deploy_agent.py`)
+
+Aegis does not just stop at finding and patching bugs — it bridges the gap directly into production through an autonomous deployment and verification loop:
+
+```
+Gatekeeper (READY_FOR_DEPLOYMENT)
+               │
+               ▼
+   [Phase 1: Platform Detection] ── (reads AEGIS_DEPLOY_PLATFORM)
+               │
+               ▼
+    [Phase 2: Deploy Trigger]    ── (Vercel / Render / Railway / AWS ECS)
+               │
+               ▼
+    [Phase 3: Liveness Poll]     ── (Polls target URL with exponential backoff)
+               │
+               ▼
+   [Phase 4: Smoke Testing]      ── (Deterministic HTTP probes on live deployment)
+               │
+       ┌───────┴───────┐
+       ▼               ▼
+ [All Pass]        [Failure Detected]
+DEPLOYED_AND_LIVE  DEPLOYMENT_FAILED
+                   🚨 HITL Alert Dispatched
+```
+
+* **Supported Platforms**:
+  * **Vercel**: `POST` to confidential Deploy Hook URL (`VERCEL_DEPLOY_HOOK_URL`).
+  * **Render**: `POST /v1/services/{id}/deploys` authenticated with `RENDER_API_KEY`.
+  * **Railway**: GraphQL `deploymentRedeploy` mutation authenticated with `RAILWAY_API_TOKEN`.
+  * **AWS ECS**: `boto3.client('ecs').update_service(cluster=..., service=..., forceNewDeployment=True)`.
+* **Zero-Breakage Graceful Skip**: If `AEGIS_DEPLOY_PLATFORM` is unset, the node gracefully skips with `SKIPPED` status, preserving full backward compatibility.
+* **Liveness Polling**: Polls the target URL every 10s (exponential backoff up to 30s) for up to 5 minutes until `< 500` status is received.
+* **Post-Deploy Smoke Tests**: Runs deterministic probes against live endpoints; if any return a `5xx` error, the deployment is marked `DEPLOYMENT_FAILED` and a `CRITICAL` HITL alert is dispatched for manual rollback.
 
 ---
 
@@ -516,6 +554,14 @@ Create a `.env` file in the root directory:
 | `ALLOW_LOCAL_TARGETS` | Boolean | `true` | Permits audits against `localhost` and `127.0.0.1`. |
 | `ALLOW_ALL_TARGETS` | Boolean | `true` | Allows auditing arbitrary domains beyond the sandbox whitelist. |
 | `ALLOWED_SANDBOX_SUFFIXES` | String | `.sandbox.internal,localhost` | Whitelisted host suffixes for exploit scripts. |
+| `AEGIS_DEPLOY_PLATFORM` | String | `None` | Target cloud platform (`vercel`, `render`, `railway`, `aws_ecs`). |
+| `VERCEL_DEPLOY_HOOK_URL` | String | `None` | Confidential Vercel Deploy Hook URL. |
+| `RENDER_API_KEY` | String | `None` | Render API Key for authenticated redeploy. |
+| `RENDER_SERVICE_ID` | String | `None` | Target Render Service ID (`srv-...`). |
+| `RAILWAY_API_TOKEN` | String | `None` | Railway API access token. |
+| `RAILWAY_DEPLOYMENT_ID` | String | `None` | Existing Railway deployment ID to redeploy. |
+| `AWS_ECS_CLUSTER` | String | `None` | Target AWS ECS cluster name. |
+| `AWS_ECS_SERVICE` | String | `None` | Target AWS ECS service name to force-redeploy. |
 
 ---
 
