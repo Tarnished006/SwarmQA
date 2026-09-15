@@ -1,28 +1,63 @@
-
 import asyncio
 import io
 import json
+import logging
 import os
 import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Annotated, TypedDict
+from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
-import docker
 from langchain_openai import ChatOpenAI
+from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
-from site_analysing_agent import Selector
+from alerts import dispatch_hitl_alert
+
+load_dotenv()
+
+logger = logging.getLogger("aegis.checking_agent")
+logging.basicConfig(level=logging.INFO)
+
+
+# ── SHARED STATE ──────────────────────────────────────────────
+class Selector(TypedDict):
+    messages: Annotated[List, add_messages]
+    url: str
+    frontend_analysis: List[str]
+    codebase_analysis: List[str]
+    active_debugger: List[str]
+    proposed_patch: List[str]
+    verification_status: str
+    codebase_path: List[str]
+    git_diff: Optional[str]
+    cleaned_errors: List[str]
+    remediation_plan: List[str]
+    test_results: List[str]
+    verification_report: List[str]
+    next: str
+
+
+# ── DOCKER UTILITY & CLEAN ROOM SANDBOX ───────────────────────
+def is_docker_running() -> bool:
+    try:
+        import docker
+        client = docker.from_env()
+        client.ping()
+        return True
+    except Exception:
+        return False
 
 
 class CleanRoomSandbox:
-    """
-    Hardened, ephemeral Docker runner designed for Blue Team patch verification.
-    Executes regression tests against a freshly patched workspace in total isolation.
-    """
-    IMAGE =  "swarm:latest"  # Pre-built image with python/pytest pre-installed
+    """Hardened Docker runner for regression testing."""
+    IMAGE = os.getenv("SANDBOX_DOCKER_IMAGE", "swarm:latest")
 
-    def __init__(self, network_name: str = "aegis_verification_net"):
+    def __init__(self, network_name: str = "checking_agent_net"):
+        import docker
         self.client = docker.from_env()
         self.network_name = network_name
         self.container = None
@@ -37,14 +72,13 @@ class CleanRoomSandbox:
                 self.network_name, driver="bridge", internal=True
             )
 
-        # Spin up clean room container
         self.container = self.client.containers.run(
             image=self.IMAGE,
             command="tail -f /dev/null",
             detach=True,
             network=self.network_name,
             user="1000:1000",
-            read_only=False, # Granted write permissions inside /tmp for test execution
+            read_only=False,
             mem_limit="512m",
             memswap_limit="512m",
             nano_cpus=1_000_000_000,
@@ -55,7 +89,6 @@ class CleanRoomSandbox:
         )
 
     def upload_workspace(self, workspace_dir: str):
-        """Archives and transfers the patched workspace into the container's /tmp directory."""
         tarstream = io.BytesIO()
         with tarfile.open(fileobj=tarstream, mode="w") as tar:
             for root, _, files in os.walk(workspace_dir):
@@ -64,13 +97,10 @@ class CleanRoomSandbox:
                     rel_path = os.path.relpath(full_path, workspace_dir)
                     tar.add(full_path, arcname=rel_path)
         tarstream.seek(0)
-        
-        # Ensure target workspace directory exists inside container
         self.container.exec_run(["mkdir", "-p", "/tmp/workspace"])
         self.container.put_archive("/tmp/workspace", tarstream)
 
     async def execute_test(self, test_filename: str, timeout_s: int = 20) -> Dict[str, Any]:
-        """Executes a single test script inside the sandbox and captures outputs."""
         def _exec():
             return self.container.exec_run(
                 ["timeout", str(timeout_s), "pytest", f"/tmp/workspace/{test_filename}", "-v"],
@@ -82,21 +112,15 @@ class CleanRoomSandbox:
             exit_code, (stdout, stderr) = await asyncio.wait_for(
                 asyncio.to_thread(_exec), timeout=timeout_s + 5
             )
-        except asyncio.TimeoutError:
             return {
-                "exit_code": -1,
-                "stdout": "",
-                "stderr": "Error: Regression test execution exceeded hard timeout."
+                "exit_code": exit_code,
+                "stdout": (stdout or b"").decode("utf-8", errors="ignore"),
+                "stderr": (stderr or b"").decode("utf-8", errors="ignore")
             }
-
-        return {
-            "exit_code": exit_code,
-            "stdout": (stdout or b"").decode("utf-8", errors="ignore"),
-            "stderr": (stderr or b"").decode("utf-8", errors="ignore")
-        }
+        except asyncio.TimeoutError:
+            return {"exit_code": -1, "stdout": "", "stderr": "Error: Test timed out."}
 
     def stop(self):
-        """Destroys the container and network context."""
         if self.container:
             try:
                 self.container.stop(timeout=2)
@@ -104,6 +128,67 @@ class CleanRoomSandbox:
             except Exception:
                 pass
             self.container = None
+
+
+async def execute_local_test(workspace_dir: str, test_filename: str, timeout_s: int = 20) -> Dict[str, Any]:
+    """Fallback local test runner when Docker is offline."""
+    def _run():
+        return subprocess.run(
+            [sys.executable, "-m", "pytest", test_filename, "-v"],
+            cwd=workspace_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_s,
+        )
+
+    try:
+        res = await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout_s + 3)
+        return {
+            "exit_code": res.returncode,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+        }
+    except (asyncio.TimeoutError, subprocess.TimeoutExpired):
+        return {"exit_code": -1, "stdout": "", "stderr": "Error: Test timed out."}
+    except Exception as e:
+        return {"exit_code": -1, "stdout": "", "stderr": f"Execution Error: {str(e)}"}
+
+
+# ── RESILIENT PATCH APPLICATION HELPER ────────────────────────
+def apply_patch_to_file(target_file: str, original_code: str, patched_code: str) -> bool:
+    """
+    Applies a code patch with CRLF / LF line-ending resilience.
+    Returns True if successfully replaced, False otherwise.
+    """
+    if not os.path.exists(target_file) or not original_code:
+        return False
+
+    with open(target_file, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    # 1. Direct match
+    if original_code in content:
+        with open(target_file, "w", encoding="utf-8") as f:
+            f.write(content.replace(original_code, patched_code, 1))
+        return True
+
+    # 2. Normalized line-ending match (CRLF <-> LF)
+    norm_content = content.replace("\r\n", "\n")
+    norm_original = original_code.replace("\r\n", "\n")
+    norm_patched = patched_code.replace("\r\n", "\n")
+
+    if norm_original in norm_content:
+        updated = norm_content.replace(norm_original, norm_patched, 1)
+        with open(target_file, "w", encoding="utf-8") as f:
+            f.write(updated)
+        return True
+
+    return False
+
+
+# ── NODE 1: SANDBOX EXECUTION NODE ────────────────────────────
 async def sandbox_execution_node(state: Selector) -> dict:
     raw_path = state.get("codebase_path", [])
     source_codebase = raw_path[0] if raw_path else ""
@@ -113,30 +198,26 @@ async def sandbox_execution_node(state: Selector) -> dict:
         return {"test_results": [json.dumps({"error": "Invalid codebase path provided."})]}
 
     if not remediation_raw:
-        return {"test_results": [json.dumps({"info": "No remediation plan found to test."})]}
+        logger.info("[Sandbox_Execution] No remediation plan to test. Fast-pass exit ($0 tokens).")
+        return {"test_results": []}
 
-    print("[Sandbox_Execution] Initializing Clean Room verification environment...")
-    
+    logger.info("[Sandbox_Execution] Setting up clean-room workspace for %d patches ...", len(remediation_raw))
     execution_logs: List[str] = []
 
-    # 1. Parse Remediation Plan JSON
     patches = []
     for plan_str in remediation_raw:
         try:
-            plan_data = json.loads(plan_str)
-            patches.append(plan_data)
-        except json.JSONDecodeError:
-            continue
+            patches.append(json.loads(plan_str))
+        except Exception:
+            pass
 
-    # 2. Work inside an isolated temporary directory on the host
-    with tempfile.TemporaryDirectory() as temp_workspace:
-        # Copy original codebase to temp workspace
+    with tempfile.TemporaryDirectory(prefix="aegis_cleanroom_") as temp_workspace:
+        # Copy codebase to isolated temp workspace
         if os.path.isdir(source_codebase):
             shutil.copytree(source_codebase, temp_workspace, dirs_exist_ok=True)
         else:
             shutil.copy2(source_codebase, temp_workspace)
 
-        # 3. Apply patches to the temporary workspace files
         test_files_created = []
         for patch in patches:
             patch_id = patch.get("id", "UNKNOWN")
@@ -146,59 +227,62 @@ async def sandbox_execution_node(state: Selector) -> dict:
             regression_test = patch.get("regression_test", "")
 
             target_file_full = os.path.join(temp_workspace, file_rel_path)
+            applied = apply_patch_to_file(target_file_full, original_code, patched_code)
+            if not applied:
+                logger.warning("[Sandbox_Execution] Patch %s could not be matched in %s", patch_id, file_rel_path)
 
-            # Apply Code Replacement
-            if os.path.exists(target_file_full) and original_code:
-                with open(target_file_full, "r", encoding="utf-8", errors="ignore") as f:
-                    file_content = f.read()
-                
-                if original_code in file_content:
-                    updated_content = file_content.replace(original_code, patched_code)
-                    with open(target_file_full, "w", encoding="utf-8") as f:
-                        f.write(updated_content)
+            # Write regression test
+            if regression_test:
+                test_filename = f"test_aegis_{patch_id}.py"
+                test_file_full = os.path.join(temp_workspace, test_filename)
+                with open(test_file_full, "w", encoding="utf-8") as f:
+                    f.write(regression_test)
+                test_files_created.append((patch_id, test_filename))
 
-            # Write Regression Test File
-            test_filename = f"test_aegis_{patch_id}.py"
-            test_file_full = os.path.join(temp_workspace, test_filename)
-            with open(test_file_full, "w", encoding="utf-8") as f:
-                f.write(regression_test)
-            
-            test_files_created.append((patch_id, test_filename))
-
-        # 4. Spin up Clean Room Docker Sandbox
-        sandbox = CleanRoomSandbox()
-        sandbox.start()
-
-        try:
-            # Upload patched workspace to container
-            sandbox.upload_workspace(temp_workspace)
-
-            # Execute each regression test inside the clean sandbox
+        # Execute tests via Docker or local fallback
+        use_docker = is_docker_running()
+        if use_docker:
+            logger.info("[Sandbox_Execution] Docker detected. Running in Docker CleanRoomSandbox.")
+            sandbox = CleanRoomSandbox()
+            try:
+                sandbox.start()
+                sandbox.upload_workspace(temp_workspace)
+                for patch_id, test_filename in test_files_created:
+                    res = await sandbox.execute_test(test_filename)
+                    execution_logs.append(json.dumps({
+                        "patch_id": patch_id,
+                        "test_file": test_filename,
+                        "exit_code": res["exit_code"],
+                        "status": "PASSED" if res["exit_code"] == 0 else "FAILED",
+                        "stdout": res["stdout"],
+                        "stderr": res["stderr"]
+                    }))
+            finally:
+                sandbox.stop()
+        else:
+            logger.info("[Sandbox_Execution] Docker unavailable. Running tests via local subprocess runner.")
             for patch_id, test_filename in test_files_created:
-                res = await sandbox.execute_test(test_filename)
-                
-                test_record = {
+                res = await execute_local_test(temp_workspace, test_filename)
+                execution_logs.append(json.dumps({
                     "patch_id": patch_id,
                     "test_file": test_filename,
                     "exit_code": res["exit_code"],
                     "status": "PASSED" if res["exit_code"] == 0 else "FAILED",
                     "stdout": res["stdout"],
                     "stderr": res["stderr"]
-                }
-                execution_logs.append(json.dumps(test_record))
+                }))
 
-        finally:
-            sandbox.stop()
+    return {"test_results": execution_logs}
 
-    return {
-        "test_results": execution_logs,
-    }
+
+# ── NODE 2: CHECKER / GATEKEEPER AGENT NODE ───────────────────
 class VerificationSummaryCounts(BaseModel):
     total_evaluated: int
     success_secure: int
     failed_vulnerable: int
     failed_regression: int
     manual_review: int
+
 
 class VerificationResult(BaseModel):
     id: str = Field(description="The ID of the exploit/patch being evaluated")
@@ -208,166 +292,76 @@ class VerificationResult(BaseModel):
         "FAILED_BUSINESS_LOGIC_REGRESSION", 
         "MANUAL_REVIEW_REQUIRED"
     ]
-    verdict_confidence: Literal["HIGH", "MEDIUM", "LOW"] = Field(
-        description="Confidence level based on test evidence clarity and completeness"
-    )
-    chain_completeness_check: str = Field(
-        description="Confirmation that all steps of a multi-hop chain are neutralized, not just the entry."
-    )
-    bypass_analysis_notes: str = Field(
-        description="Attacker-perspective review checking for trivial evasions or new attack surfaces."
-    )
-    feedback_for_patcher: Optional[str] = Field(
-        description="Precise technical instructions for the patch agent if the verdict is FAILED. None if SUCCESS."
-    )
-    retry_limit_exceeded: bool = Field(
-        description="True if the finding has hit the max retry limit, breaking the loop."
-    )
+    verdict_confidence: Literal["HIGH", "MEDIUM", "LOW"]
+    chain_completeness_check: str
+    bypass_analysis_notes: str
+    feedback_for_patcher: Optional[str] = None
+    retry_limit_exceeded: bool = False
+
 
 class VerificationReport(BaseModel):
-    overall_status: Literal["READY_FOR_DEPLOYMENT", "BLOCKED", "PARTIAL_WITH_REVIEW"]
-    blocking_findings: List[str] = Field(
-        description="List of exploit IDs that resulted in a FAILED verdict."
-    )
-    manual_review_findings: List[str] = Field(
-        description="List of exploit IDs flagged for human intervention."
-    )
+    overall_status: Literal["READY_FOR_DEPLOYMENT", "BLOCKED", "PARTIAL_WITH_REVIEW", "NO_EXPLOITS_CONFIRMED"]
+    blocking_findings: List[str] = Field(default_factory=list)
+    manual_review_findings: List[str] = Field(default_factory=list)
     summary_counts: VerificationSummaryCounts
     results: List[VerificationResult] = Field(default_factory=list)
 
-async def checker_agent(state:Selector):
-    system="""
-    You are an Autonomous DevSecOps Verification Engine — the Lead Security Auditor 
-and QA Gatekeeper. You operate as the final validation node in the pipeline, sitting 
-between the Remediation node and production deployment. Nothing ships past you 
-without an explicit verdict. Your objective is to ingest the original exploits, 
-the patches applied, and regression test execution results, and definitively 
-determine whether each vulnerability is neutralized without breaking legitimate 
-business logic — and whether the pipeline as a whole is safe to deploy.
 
-INPUT DATA SOURCES:
-1. <VERIFIED_EXPLOITS> — original attack vectors, payloads, targets, and 
-   chain_steps (if a multi-hop chain from the correlation node).
-2. <REMEDIATION_PLAN> — patches applied (original vs. patched snippets), 
-   regression tests, blast_radius, and requires_human_review flags.
-3. <TEST_EXECUTION_RESULTS> — stdout/stderr, HTTP status codes, and response 
-   bodies from running regression tests against the patched sandbox.
-4. <RETRY_COUNT> — how many times this specific finding has already looped 
-   through patch→verify. If absent, assume this is attempt 1.
+def get_checker_llm() -> ChatOpenAI:
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY")
+    base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE")
+    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-═══════════════════════════════════
-STAGE 1 — EXPLOIT NEUTRALIZATION VERIFICATION
-═══════════════════════════════════
-Cross-reference `payload_used` against `patched_code_snippet` and the actual 
-test results (not just the code's apparent intent):
-- Parameterization vs. blocklist — does the fix use framework-native 
-  parameterized queries/prepared statements, or a brittle string/regex filter?
-- Authorization — does the code now check ownership against the trusted 
-  session/JWT `user_id`, or did it just remove/hide a UI element?
-- Test evidence — did the malicious test case return the expected block 
-  (401/403/400/422), or does a 200/500 indicate the exploit still works or 
-  the server crashed (crash-on-attack is its own finding: availability risk, 
-  not a fix)?
-- CHAIN COMPLETENESS — if this exploit was a multi-hop `chain_steps` entry 
-  from the correlation node, verify EVERY step in the chain is now blocked, 
-  not just the entry point. A patch that closes step 1 but leaves step 2 
-  reachable via a different route must NOT be marked SUCCESS_SECURE.
+    if not api_key:
+        if base_url and ("localhost" in base_url or "127.0.0.1" in base_url):
+            api_key = "ollama"
+        else:
+            raise ValueError("Missing LLM API Key! Please set OPENAI_API_KEY in your .env file.")
 
-═══════════════════════════════════
-STAGE 2 — BUSINESS LOGIC REGRESSION CHECK
-═══════════════════════════════════
-Analyze the legitimate/safe test cases in <TEST_EXECUTION_RESULTS>:
-- Did the patch block legitimate users or valid input (overly aggressive 
-  validation, regex too strict, allow-list missing a valid field)?
-- Is the API contract intact — same response schema/shape for healthy 
-  requests, no new required fields breaking existing clients?
-- Latency/behavior change — does the patch introduce a blocking call 
-  (e.g., synchronous lookup) that could newly violate expected performance 
-  characteristics, if that data is available in test results?
-- Any legitimate-case test failure → `FAILED_BUSINESS_LOGIC_REGRESSION`, 
-  regardless of how well the exploit itself was blocked.
+    return ChatOpenAI(
+        model=model_name,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=0.0,
+        max_tokens=3000,
+    )
 
-═══════════════════════════════════
-STAGE 3 — BYPASS, EVASION & NEW-SURFACE ANALYSIS
-═══════════════════════════════════
-Evaluate `patched_code_snippet` from an attacker's perspective, not just 
-against the original payload:
-- Trivial bypass — case variation, encoding tricks, alternate syntax 
-  (`UNION`, nested queries, whitespace/comment insertion) that the exact 
-  original payload wouldn't test but the same root cause would still allow.
-- New vulnerability introduced — swallowed exceptions causing inconsistent 
-  state, a new injection point in the sanitization logic itself, a broadened 
-  exception handler that now masks unrelated errors.
-- Incomplete root-cause fix — the patch addresses the symptom at the 
-  reported endpoint but the same insecure pattern (e.g., same raw-query 
-  helper function) is still reachable from a different, unpatched caller — 
-  flag this explicitly even though it's outside the original exploit's path.
-- If bypassable or root cause unaddressed → `FAILED_STILL_VULNERABLE` with 
-  explicit, technical `feedback_for_patcher` (what specifically remains 
-  exploitable, not just "try again").
 
-═══════════════════════════════════
-STAGE 4 — RETRY LOOP SAFETY
-═══════════════════════════════════
-- If `RETRY_COUNT` for a given finding has already reached 3 without 
-  reaching SUCCESS_SECURE, do NOT return `FAILED_STILL_VULNERABLE` again 
-  to trigger another automatic retry. Instead return 
-  `MANUAL_REVIEW_REQUIRED` with `retry_limit_exceeded: true` — this breaks 
-  the loop and routes to a human rather than cycling indefinitely.
-- Any finding where `requires_human_review` was already `true` in the 
-  <REMEDIATION_PLAN> (e.g., WIDE blast radius, major dependency bump) is 
-  verified for correctness but always resolves to at most 
-  `MANUAL_REVIEW_REQUIRED`, never auto-approved to `SUCCESS_SECURE`.
+async def checker_agent(state: Selector) -> dict:
+    active_debugger = state.get("active_debugger", [])
+    remediation_plan = state.get("remediation_plan", [])
+    test_results = state.get("test_results", [])
+    codebase_paths = state.get("codebase_path", [])
+    repo_path = codebase_paths[0] if codebase_paths else "."
 
-═══════════════════════════════════
-STAGE 5 — PER-FINDING VERDICT
-═══════════════════════════════════
-- SUCCESS_SECURE — exploit (and full chain, if applicable) neutralized, 
-  all tests pass, business logic intact, no new surface introduced.
-- FAILED_STILL_VULNERABLE — root cause not fixed or trivially bypassable.
-- FAILED_BUSINESS_LOGIC_REGRESSION — secured but broke legitimate functionality.
-- MANUAL_REVIEW_REQUIRED — too complex to verify autonomously (architectural 
-  shift, dependency overhaul, retry limit exceeded, or pre-flagged high 
-  blast radius).
-Attach a `verdict_confidence: HIGH|MEDIUM|LOW` — LOW confidence (e.g., test 
-results were partial/ambiguous, or static-only evidence with no live test 
-output) should push borderline cases toward `MANUAL_REVIEW_REQUIRED` rather 
-than a guessed SUCCESS_SECURE.
+    # Fast-pass: No exploits or patches evaluated
+    if not active_debugger and not remediation_plan:
+        logger.info("[Checker Agent] No exploits or patches to evaluate. Pipeline clear.")
+        return {
+            "verification_report": [],
+            "verification_status": "READY_FOR_DEPLOYMENT",
+            "messages": ["[Checker Agent] Fast-pass: Clean bill of health. No exploits confirmed."]
+        }
 
-═══════════════════════════════════
-STAGE 6 — PIPELINE-LEVEL AGGREGATION
-═══════════════════════════════════
-Derive `overall_status` from the full set of per-finding verdicts, not just 
-majority vote:
-- READY_FOR_DEPLOYMENT — every finding is SUCCESS_SECURE.
-- BLOCKED — any single finding is FAILED_STILL_VULNERABLE or 
-  FAILED_BUSINESS_LOGIC_REGRESSION (one unresolved critical/high finding 
-  blocks the whole batch, even if others passed).
-- PARTIAL_WITH_REVIEW — all findings are either SUCCESS_SECURE or 
-  MANUAL_REVIEW_REQUIRED (nothing outright failed, but not fully autonomous-clear).
-Never return READY_FOR_DEPLOYMENT if any CRITICAL or HIGH-impact finding 
-(per the original `impact` rating) is not SUCCESS_SECURE, even if lower 
--severity findings all passed.
+    system = """You are an Autonomous DevSecOps Verification Engine — the Lead Security Auditor
+and QA Gatekeeper. Nothing ships past you without an explicit verdict.
+Your objective: ingest the original exploits, patches applied, and regression test results,
+and definitively determine whether each vulnerability is neutralized without breaking business logic.
 
-═══════════════════════════════════
-OUTPUT CONTRACT
-═══════════════════════════════════
-- Output ONLY valid JSON adhering strictly to the VerificationReport schema.
-- No markdown, narration, or text outside the JSON payload.
-- Every applied patch has one VerificationResult object: 
-  [id] [verdict] [verdict_confidence] [chain_completeness_check] 
-  [bypass_analysis_notes] [feedback_for_patcher] [retry_limit_exceeded].
-- Top-level: [overall_status] [blocking_findings] [manual_review_findings] 
-  [summary_counts].
-- If `overall_status` is not READY_FOR_DEPLOYMENT, every non-SUCCESS_SECURE 
-  finding must include precise, technical `feedback_for_patcher` so the loop 
-  can retry — vague feedback (e.g., "still vulnerable") is not acceptable.
-- Never include exploit payloads or attack code in `feedback_for_patcher` 
-  beyond what's necessary to describe the bypass technique category.
-"""
+EVALUATION CRITERIA:
+1. EXPLOIT NEUTRALIZATION: Does the patch actually neutralize the root cause?
+2. BUSINESS REGRESSION: Did the patch break valid input or existing API contracts?
+3. BYPASS ANALYSIS: Could an attacker trivially evade this fix with alternate syntax?
+4. HUMAN REVIEW: If requires_human_review was flagged, verdict must be MANUAL_REVIEW_REQUIRED.
 
-    human="""
-    <VERIFIED_EXPLOITS>
+OVERALL STATUS RULES:
+- READY_FOR_DEPLOYMENT: All findings are SUCCESS_SECURE.
+- BLOCKED: Any finding is FAILED_STILL_VULNERABLE or FAILED_BUSINESS_LOGIC_REGRESSION.
+- PARTIAL_WITH_REVIEW: Findings are either SUCCESS_SECURE or MANUAL_REVIEW_REQUIRED.
+
+Output ONLY valid JSON matching the VerificationReport schema."""
+
+    human = """<VERIFIED_EXPLOITS>
 {verified_exploits}
 </VERIFIED_EXPLOITS>
 
@@ -379,19 +373,55 @@ OUTPUT CONTRACT
 {test_execution_results}
 </TEST_EXECUTION_RESULTS>
 
-Evaluate the effectiveness and safety of the applied patches based on the test execution results and codebase logic. Return ONLY the structured VerificationReport JSON.
-"""
+Evaluate the effectiveness and safety of the applied patches. Return ONLY the structured VerificationReport JSON."""
 
-    prompt=ChatPromptTemplate.from_messages([("system",system),("human",human)])
-    llm=ChatOpenAI(model="gpt-4.1-mini",temperature=0.0,max_tokens=2000)
-    structured_llm=llm.with_structured_output(VerificationReport)
-    chain=prompt | structured_llm
-    report=await chain.ainvoke({
-        "verified_exploits":"\n".join(state.get("active_debugger",[])),
-        "remediation_plan":"\n".join(state.get("remediation_plan",[])),
-        "test_execution_results":"\n".join(state.get("test_results",[]))
-    })
-    return {
-        "verification_report": [report.model_dump_json()],
-        "verification_status": report.overall_status 
-    }
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system),
+        ("human", human)
+    ])
+
+    try:
+        llm = get_checker_llm()
+        structured_llm = llm.with_structured_output(VerificationReport)
+        chain = prompt | structured_llm
+
+        report: VerificationReport = await chain.ainvoke({
+            "verified_exploits": "\n".join(active_debugger),
+            "remediation_plan": "\n".join(remediation_plan),
+            "test_execution_results": "\n".join(test_results),
+        })
+
+        logger.info("[Checker Agent] Verification completed. Overall status: %s", report.overall_status)
+
+        # Autonomous HITL Alert if blocked or requires human review
+        if report.overall_status in ("BLOCKED", "PARTIAL_WITH_REVIEW") or report.manual_review_findings:
+            await dispatch_hitl_alert(
+                title=f"Deployment Gate: {report.overall_status}",
+                summary=(
+                    f"Aegis Gatekeeper status is '{report.overall_status}'. "
+                    f"Blocking issues: {len(report.blocking_findings)}, "
+                    f"Manual review required: {len(report.manual_review_findings)}."
+                ),
+                severity="CRITICAL" if report.overall_status == "BLOCKED" else "MODERATE",
+                details={
+                    "overall_status": report.overall_status,
+                    "blocking_findings": ", ".join(report.blocking_findings) or "None",
+                    "manual_review_findings": ", ".join(report.manual_review_findings) or "None",
+                    "total_evaluated": report.summary_counts.total_evaluated,
+                },
+                codebase_path=repo_path,
+            )
+
+        return {
+            "verification_report": [report.model_dump_json()],
+            "verification_status": report.overall_status,
+            "messages": [f"[Checker Agent] Gatekeeper decision: {report.overall_status}."]
+        }
+
+    except Exception as e:
+        logger.error("[Checker Agent Error] Verification failed: %s", e)
+        return {
+            "verification_report": [],
+            "verification_status": "BLOCKED",
+            "messages": [f"[Checker Agent Error] Verification evaluation crashed: {str(e)}"]
+        }
