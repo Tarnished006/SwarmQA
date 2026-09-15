@@ -7,7 +7,7 @@
 [![Framework](https://img.shields.io/badge/API-FastAPI%20%7C%20Uvicorn-green.svg)](https://fastapi.tiangolo.com/)
 [![Sandboxing](https://img.shields.io/badge/Sandbox-Docker%20%7C%20Subprocess%20CleanRoom-purple.svg)](https://www.docker.com/)
 [![Defense](https://img.shields.io/badge/Security-Prompt%20Injection%20Immune-red.svg)](#-advanced-security--threat-defense)
-[![Test Coverage](https://img.shields.io/badge/Tests-7%2F7%20Suites%20Passing-brightgreen.svg)](#-verification--test-suites)
+[![Test Coverage](https://img.shields.io/badge/Tests-8%2F8%20Suites%20Passing-brightgreen.svg)](#-verification--test-suites)
 
 ---
 
@@ -33,6 +33,11 @@
   - [Adversarial Prompt Injection Defense](#-adversarial-prompt-injection-defense-pipeline_guardpy)
   - [Autonomous HITL Alerting System](#-autonomous-hitl-alerting-system-alertspy)
   - [Selective Auto-Fix vs. Silent Anomaly Escalation](#-selective-auto-fix-vs-silent-anomaly-escalation)
+- [Autonomous CI/CD & Git Automation](#-autonomous-cicd--git-automation)
+  - [Enterprise CI Runner (`aegis_ci.py`)](#1-enterprise-ci-runner-aegis_cipy)
+  - [GitHub Actions PR Bot Workflow](#2-github-actions-pr-bot-workflow)
+  - [Local Git Pre-Push Hook](#3-local-git-pre-push-hook)
+  - [OpenClaw & ChatOps Autonomous Integration](#4-openclaw--chatops-autonomous-integration)
 - [Tech Stack](#-tech-stack)
 - [Project Directory Structure](#-project-directory-structure)
 - [Getting Started & Installation](#-getting-started--installation)
@@ -321,6 +326,93 @@ Project Aegis keeps developers informed even when unattended:
 
 ---
 
+## 🔄 Autonomous CI/CD & Git Automation
+
+Project Aegis provides native, serverless autonomy designed to scale across engineering teams and continuous integration pipelines without manual intervention.
+
+### 1. Enterprise CI Runner (`aegis_ci.py`)
+The standalone CLI runner executes directly inside CI runners (GitHub Actions, GitLab CI, Jenkins) or local git hooks without needing a running background web server:
+
+```bash
+# Run security gate against current pull request diff
+python aegis_ci.py --repo . --base-ref origin/main --fail-on-critical --json-report aegis-report.json
+```
+
+**Key Capabilities**:
+- **Automatic Diff Isolation**: Extracts the exact modified files and hunks between `origin/main` (or any base ref) and the current commit.
+- **GitHub Step Summary Generator**: Emits GitHub Flavored Markdown directly into `$GITHUB_STEP_SUMMARY` with badges, tables of verified exploits, synthesized patches, and clean-room test results.
+- **Deterministic CI Exit Codes**: Returns `0` when code is clean or successfully auto-patched (`READY_FOR_DEPLOYMENT`); returns `1` when critical unpatched vulnerabilities or silent anomalies block deployment.
+
+---
+
+### 2. GitHub Actions PR Bot Workflow (`.github/workflows/aegis.yml`)
+Every Pull Request targeting `main`, `master`, or `develop` triggers an automated multi-agent audit:
+
+```yaml
+name: Project Aegis — Autonomous DevSecOps Gate
+
+on:
+  pull_request:
+    branches: [ main, master, develop ]
+  push:
+    branches: [ main ]
+
+jobs:
+  security-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - run: |
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+
+      - name: Run Project Aegis
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: |
+          python aegis_ci.py --repo . --base-ref origin/${{ github.base_ref }} --fail-on-critical
+
+      - name: Archive Audit Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aegis-audit-artifacts
+          path: |
+            aegis-report.json
+            aegis_summary.md
+            .aegis_alerts/
+```
+
+---
+
+### 3. Local Git Pre-Push Hook (`scripts/install_hooks.py`)
+Prevent vulnerable code from ever reaching the remote repository by installing the pre-push gate locally:
+
+```bash
+python scripts/install_hooks.py
+```
+
+This installs `.git/hooks/pre-push`, which automatically runs `python aegis_ci.py --fail-on-critical` before any `git push` succeeds. If a vulnerability is found, the push is rejected and the synthesized patch or anomaly alert is displayed in the terminal.
+
+---
+
+### 4. OpenClaw & ChatOps Autonomous Integration
+Project Aegis seamlessly integrates with autonomous background agents like **OpenClaw**:
+- **24/7 Repository Watcher**: OpenClaw's git diff plugin (`@openclaw/diffs`) monitors local repository directories.
+- **REST Trigger**: On detected changes or commits, OpenClaw sends `POST /api/v1/run-audit` with `"git_diff": "<raw diff>"`.
+- **Interactive ChatOps**: If Aegis discovers a critical anomaly or a patch requiring sign-off, OpenClaw pings the developer directly in Slack, Discord, or WhatsApp with an interactive prompt to review or approve the patch.
+
+---
+
 ## 💻 Tech Stack
 
 | Category | Technologies |
@@ -475,7 +567,7 @@ Create a `.env` file in the root directory:
 
 ## 🧪 Verification & Test Suites
 
-Project Aegis maintains 7 offline, zero-token test suites:
+Project Aegis maintains 8 offline, zero-token test suites:
 
 ```powershell
 ============================================================
@@ -488,8 +580,9 @@ PROJECT AEGIS - MASTER PIPELINE TEST RUNNER
 [PASS] test_patch_suite.py             # Context extraction, patching & HITL escalation
 [PASS] test_checking_suite.py          # Line ending normalization & regression runner
 [PASS] test_defense_and_anomaly_suite.py # Prompt injection defanging & anomaly checks
+[PASS] test_ci_runner_suite.py         # Autonomous CI runner & git diff extraction
 ============================================================
-ALL 7 AGENT TEST SUITES PASSED SUCCESSFULLY!
+ALL 8 AGENT TEST SUITES PASSED SUCCESSFULLY!
 ============================================================
 ```
 
