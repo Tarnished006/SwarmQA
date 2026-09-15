@@ -1,184 +1,201 @@
+import os
+import logging
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from langgraph.graph.message import add_messages
-from typing import Literal, Optional, List,Annotated, TypedDict
+from typing import Literal, Optional, List, Annotated, TypedDict
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logger = logging.getLogger("aegis.triage_agent")
+logging.basicConfig(level=logging.INFO)
 
 
+# ── SHARED STATE ──────────────────────────────────────────────
 class Selector(TypedDict):
-    messages:Annotated[List,add_messages]
-    url:str
-    frontend_analysis:List[str]
-    codebase_analysis:List[str]
-    active_debugger:List[str]
-    proposed_patch:List[str]
+    messages: Annotated[List, add_messages]
+    url: str
+    frontend_analysis: List[str]
+    codebase_analysis: List[str]
+    active_debugger: List[str]
+    proposed_patch: List[str]
     verification_status: str
-    codebase_path:List[str]
-    cleaned_errors:List[str]
-    remediation_plan:List[str]
-    test_results:List[str]
-    verification_report:List[str]
+    codebase_path: List[str]
+    git_diff: Optional[str]
+    cleaned_errors: List[str]
+    remediation_plan: List[str]
+    test_results: List[str]
+    verification_report: List[str]
     next: str
 
-class VerifiedExploit(BaseModel):
-    id: str = Field(
-        description="Unique exploit ID, e.g., EXP-001"
-    )
-    attack_chain_stage: Literal[
-        "RECONNAISSANCE", 
-        "INITIAL_ACCESS", 
-        "PRIVILEGE_ESCALATION", 
-        "LATERAL_MOVEMENT", 
-        "IMPACT"
-    ]
-    mitre_technique_id: str = Field(
-        description="Closest MITRE ATTACK technique ID, e.g., T1190 or T1078"
-    )
-    target: str = Field(
-        description="Specific target endpoint, form, or parameter"
-    )
-    severity: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
-    reproduction_evidence: str = Field(
-        description="Concrete observed evidence proving the exploit (HTTP status, DB error, timing anomaly)"
-    )
-    remediation_target: str = Field(
-        description="Exact file, controller, or config path for downstream Patch Debugger"
-    )
+
+# ── OUTPUT SCHEMAS ────────────────────────────────────────────
 class CorrelatedHypothesis(BaseModel):
     id: str = Field(description="Unique correlated ID, e.g., CORR-001")
     root_cause: str = Field(description="The underlying defect driving the vulnerability")
     chain_steps: List[str] = Field(
-        description="Ordered array of execution steps for multi-hop attacks. For pairwise, just list the single interaction step."
+        description="Ordered execution steps for multi-hop attacks. Single-step for pairwise findings."
     )
     frontend_reference: Optional[str] = Field(
-        description="Exact frontend element (selector/label/testid + form action or param name)"
+        default=None,
+        description="Exact frontend element (selector/label + form action or param name)"
     )
     backend_reference: Optional[str] = Field(
-        description="Exact backend reference (file path + function/route name + line number)"
+        default=None,
+        description="Exact backend reference (file path + function/route + line number)"
+    )
+    # Structured fields for downstream active_tester and patch_agent correlation
+    endpoint: Optional[str] = Field(
+        default=None,
+        description="Resolved API endpoint, e.g., '/api/v1/users/{id}'"
+    )
+    parameter: Optional[str] = Field(
+        default=None,
+        description="Resolved vulnerable parameter or variable name, e.g., 'user_id'"
     )
     impact: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
     confidence: Literal["CONFIRMED", "LIKELY"]
     verification_technique: str = Field(
-        description="Category of testing required (e.g., 'authorization boundary test', 'parameterization check')"
+        description="Testing category required, e.g., 'authorization boundary test', 'parameterization check'"
     )
 
-class TriageReport(BaseModel):
-    prioritized_hypotheses: List[CorrelatedHypothesis]
 
+class TriageReport(BaseModel):
+    prioritized_hypotheses: List[CorrelatedHypothesis] = Field(default_factory=list)
+
+
+# ── UNIFIED MODEL LOADER ──────────────────────────────────────
+def get_triage_llm() -> ChatOpenAI:
+    """
+    Unified, fail-safe OpenAI-compatible model loader.
+    Reads standard environment variables:
+    - OPENAI_API_KEY: API key (Groq, OpenAI, DeepSeek, etc.)
+    - OPENAI_BASE_URL: Endpoint URL (optional, e.g. for Groq, Ollama)
+    - OPENAI_MODEL: Model identifier (defaults to gpt-4o-mini)
+    """
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY")
+    base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE")
+    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+    if not api_key:
+        if base_url and ("localhost" in base_url or "127.0.0.1" in base_url):
+            api_key = "ollama"
+        else:
+            raise ValueError(
+                "Missing LLM API Key! Please set OPENAI_API_KEY in your .env file."
+            )
+
+    return ChatOpenAI(
+        model=model_name,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=0.0,
+        max_tokens=4000,
+    )
+
+
+# ── MAIN AGENT NODE ───────────────────────────────────────────
 async def triage_agent(state: Selector) -> dict:
+    """
+    Correlation and triage node — sits between static analysis and active verification.
+
+    Ingests frontend findings (Finding[]) and codebase findings (CodebaseFinding[])
+    from upstream agents, correlates them by shared endpoint/parameter, constructs
+    multi-hop attack chains, and emits a prioritized CorrelatedHypothesis list
+    into `cleaned_errors` for the Red Team.
+    """
     frontend_raw = state.get("frontend_analysis", [])
     codebase_raw = state.get("codebase_analysis", [])
+
+    # ── FAST-PASS: Nothing to correlate ──────────────────────
+    if not frontend_raw and not codebase_raw:
+        logger.info(
+            "[Triage Agent] Both upstream agents returned empty findings. "
+            "Fast-pass exit ($0 tokens spent)."
+        )
+        return {
+            "cleaned_errors": [],
+            "messages": ["[Triage Agent] Fast-pass: No findings from Recon Team to correlate."]
+        }
 
     frontend_str = "\n".join(frontend_raw) if frontend_raw else "No frontend findings recorded."
     codebase_str = "\n".join(codebase_raw) if codebase_raw else "No codebase findings recorded."
 
-    system_prompt = """
-    You are an Autonomous DevSecOps Correlation & Vulnerability Triage Engine — the 
-synthesis node that sits between independent static analyzers and the active 
-verification layer. Your objective is to ingest frontend and backend findings, 
-reconcile contradictions, eliminate duplicates, construct multi-step attack 
-chains across layers, and output a unified, confidence-scored, prioritized 
-hypothesis list for downstream verification.
+    logger.info(
+        "[Triage Agent] Correlating %d frontend + %d codebase findings ...",
+        len(frontend_raw), len(codebase_raw)
+    )
+
+    # ── SYSTEM PROMPT ─────────────────────────────────────────
+    system_prompt = """You are an Autonomous DevSecOps Correlation & Vulnerability Triage Engine.
+You sit between independent static analyzers and the active verification layer.
+
+Your objective: ingest frontend and backend findings, reconcile contradictions, eliminate
+duplicates, construct multi-step attack chains, and output a unified, confidence-scored,
+prioritized hypothesis list for downstream active testing and patching.
 
 INPUT DATA SOURCES:
-1. <FRONTEND_ANALYSIS> — DOM-level attack surfaces, form inputs/actions, IDOR 
-   candidates, client-side trust signals.
-2. <CODEBASE_ANALYSIS> — API controllers, raw SQL/queries, missing auth 
-   decorators, mass-assignment risks, infra/config flaws.
-3. <INFRA_ANALYSIS> (if present) — container, IaC, CI/CD, and dependency 
-   findings from the DevOps layer, for chains that cross into deployment risk.
+1. <FRONTEND_ANALYSIS> — DOM-level attack surfaces. Each finding is a JSON object with fields:
+   id, layer, category, target_element, target_url_or_path, param_name, http_method, risk_priority, test_action.
+
+2. <CODEBASE_ANALYSIS> — API controllers, SQL queries, auth gaps, infra flaws. Each finding is JSON with fields:
+   id, layer, file_path, category, issue_type, location, route_or_endpoint, param_or_variable,
+   vulnerable_snippet, severity, description.
 
 ═══════════════════════════════════
 STAGE 1 — ENTITY RESOLUTION
 ═══════════════════════════════════
-Before correlating, normalize both inputs into a common reference space:
-- Match DOM form `action` attributes and fetch/XHR call targets to backend 
-  route definitions.
-- Match DOM input `name`/`id` attributes to controller parameter names, 
-  request-body fields, and SQL/ORM query variables.
-- Match DOM-visible object identifiers (order IDs, user IDs, slugs) to 
-  their corresponding database lookup calls.
-- Where a match is ambiguous (e.g., a generic field name like `id` appears 
-  in multiple controllers), retain all plausible candidates rather than 
-  guessing — flag as `entity_match_confidence: LOW` and carry all candidates 
-  into Stage 2.
+Normalize both inputs into a common reference space:
+- Match DOM form `target_url_or_path` and `param_name` to backend `route_or_endpoint` and `param_or_variable`.
+- Where ambiguous (generic field name like `id` appears in multiple controllers), retain all candidates.
+- For each resolved pair, populate the `endpoint` and `parameter` fields in your output — these are
+  REQUIRED by the downstream patch_agent for automated file targeting.
 
 ═══════════════════════════════════
 STAGE 2 — CORRELATION & CHAIN CONSTRUCTION
 ═══════════════════════════════════
-1. PAIRWISE LINKING — connect a frontend finding to its backend counterpart 
-   when Stage 1 produces a confident match (e.g., an unvalidated DOM field 
-   feeding directly into an unescaped SQL query).
-2. MULTI-HOP CHAINS — do not stop at pairwise links. If a correlated finding 
-   (e.g., IDOR on `/api/orders/{id}`) exposes data that a second, separate 
-   finding (e.g., missing role check on an admin route) could then leverage, 
-   construct the multi-step hypothesis as a single chained entry with an 
-   ordered `chain_steps` array, not two disconnected findings.
-3. DEDUPLICATE BY ROOT CAUSE — if both analyzers describe the same underlying 
-   defect from different vantage points, merge into one finding carrying 
-   both `frontend_reference` and `backend_reference` fields. Never emit the 
-   same root cause twice.
-4. CONFLICT RESOLUTION — if the two analyses disagree (e.g., frontend infers 
-   a field is validated based on a visible `pattern` attribute, but backend 
-   shows no server-side re-validation), the backend finding wins for 
-   severity purposes — client-side controls are never trusted as mitigating.
+1. PAIRWISE LINKING — connect a frontend finding to its backend counterpart when Stage 1 gives a confident match.
+2. MULTI-HOP CHAINS — if a correlated finding (e.g., IDOR on /api/orders/{id}) exposes data that a second
+   finding (e.g., missing role check on admin route) could leverage, construct as a single chained entry
+   with an ordered `chain_steps` array.
+3. DEDUPLICATE BY ROOT CAUSE — merge findings that describe the same underlying defect. Never emit the same root cause twice.
+4. CONFLICT RESOLUTION — if frontend and backend disagree (e.g., client-side validation present but server
+   has none), the backend finding wins for severity — client-side controls are never trusted as mitigating.
+5. SINGLE-SOURCE FINDINGS — if a finding exists in only one layer but is HIGH/CRITICAL severity, still emit
+   it. Populate only the applicable reference field (frontend_reference or backend_reference).
 
 ═══════════════════════════════════
-STAGE 3 — SEVERITY & CONFIDENCE MATRIX
+STAGE 3 — SEVERITY & CONFIDENCE
 ═══════════════════════════════════
-Rate each correlated hypothesis on two independent axes:
-
-IMPACT (what happens if true):
+IMPACT (what happens if exploited):
 - CRITICAL: auth bypass, full IDOR chain to sensitive data, RCE-class injection
 - HIGH: single-layer confirmed injection/IDOR, privilege escalation path
 - MEDIUM: exploitable only under additional unconfirmed conditions
-- LOW: defense-in-depth gap with no direct exploitation path evident
+- LOW: defense-in-depth gap with no direct exploitation path
 
-CONFIDENCE (how well-evidenced the correlation is):
-- CONFIRMED: UI surface AND backend weakness both present with a clean 
-  entity match
-- LIKELY: strong entity match but one side inferred rather than directly 
-  observed (e.g., backend shows raw SQL but the exact reachable DOM field 
-  is ambiguous among candidates)
-- SPECULATIVE: root cause plausible but entity resolution unresolved
+CONFIDENCE:
+- CONFIRMED: UI surface AND backend weakness both present with clean entity match
+- LIKELY: strong entity match but one side inferred rather than directly observed
 
-Only CONFIRMED and LIKELY hypotheses are emitted. SPECULATIVE findings are 
-dropped per Stage 4.
+Only CONFIRMED and LIKELY hypotheses are emitted. Drop SPECULATIVE findings silently.
 
 ═══════════════════════════════════
 STAGE 4 — FALSE POSITIVE FILTERING
 ═══════════════════════════════════
-- Omit any finding with no reachable UI entry point AND no externally 
-  callable route (dead code, internal-only utilities).
-- Omit theoretical code weaknesses that both analyzers only speculate about 
-  without an evidenced trigger path.
-- Omit findings whose only DOM support is a disabled/hidden element that 
-  Stage 1 cannot tie to a real reachable route.
-
-═══════════════════════════════════
-STAGE 5 — REMEDIATION PRIMING
-═══════════════════════════════════
-Every emitted hypothesis must carry enough targeting detail that neither the 
-active verification node nor the patch node needs to re-investigate:
-- Exact frontend element (selector/label/testid + form action or param name)
-- Exact backend reference (file path + function/route name + line number if 
-  available)
-- Ordered chain_steps if multi-hop
-- Suggested verification technique category (e.g., "authorization boundary 
-  test," "parameterization check") — not a payload or exploit script
+Omit findings with: no reachable UI entry point AND no externally callable route (dead code),
+theoretical weaknesses without evidenced trigger path, or DOM-only support from disabled/hidden elements.
 
 ═══════════════════════════════════
 OUTPUT CONTRACT
 ═══════════════════════════════════
-- Output ONLY valid JSON matching the provided schema (CorrelatedHypothesis[]).
-- No markdown, narration, or caveats outside the JSON payload.
-- Each entry: [id] [root_cause] [chain_steps] [frontend_reference] 
-  [backend_reference] [impact] [confidence] [verification_technique].
-- Never generate exploit scripts, payloads, or working attack code — output 
-  correlated hypotheses and precise targeting information only.
-- If a finding cannot be resolved to CONFIRMED or LIKELY confidence, omit 
-  it silently rather than including it as speculative.
-"""
+- Output ONLY valid JSON matching the TriageReport schema (prioritized_hypotheses array).
+- No markdown, narration, or caveats outside the JSON.
+- Each entry MUST populate: id, root_cause, chain_steps, impact, confidence, verification_technique.
+- MUST populate `endpoint` and `parameter` whenever a backend finding provides route_or_endpoint / param_or_variable.
+- Never generate exploit scripts, payloads, or working attack code."""
+
     human_prompt = """<FRONTEND_ANALYSIS>
 {frontend_findings}
 </FRONTEND_ANALYSIS>
@@ -187,21 +204,49 @@ OUTPUT CONTRACT
 {codebase_findings}
 </CODEBASE_ANALYSIS>
 
-Correlate, deduplicate, and reconcile the findings above into a unified array of Prioritized Attack Hypotheses."""
+Correlate, deduplicate, and reconcile the findings above into a prioritized attack hypothesis list."""
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("human", human_prompt)
     ])
 
-    llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0.0)
-    chain = prompt | llm.with_structured_output(TriageReport)
-    report: TriageReport = await chain.ainvoke({
-        "frontend_findings": frontend_str,
-        "codebase_findings": codebase_str
-    })
-    cleaned_errors = [h.model_dump_json() for h in report.prioritized_hypotheses]
+    try:
+        llm = get_triage_llm()
+        structured_llm = llm.with_structured_output(TriageReport)
+        chain = prompt | structured_llm
 
-    return {
-        "cleaned_errors": cleaned_errors,
-    }
+        report: TriageReport = await chain.ainvoke({
+            "frontend_findings": frontend_str,
+            "codebase_findings": codebase_str,
+        })
+
+        cleaned_errors = [h.model_dump_json() for h in report.prioritized_hypotheses]
+
+        # Log what the triage found — critical for debugging pipeline
+        for h in report.prioritized_hypotheses:
+            logger.info(
+                "[Triage Agent] %s | %s/%s | endpoint=%s | param=%s",
+                h.id, h.impact, h.confidence,
+                h.endpoint or "N/A", h.parameter or "N/A"
+            )
+
+        logger.info(
+            "[Triage Agent] Produced %d correlated hypotheses from %d+%d raw findings.",
+            len(cleaned_errors), len(frontend_raw), len(codebase_raw)
+        )
+
+        return {
+            "cleaned_errors": cleaned_errors,
+            "messages": [
+                f"[Triage Agent] Correlated {len(cleaned_errors)} attack hypotheses "
+                f"from {len(frontend_raw)} frontend + {len(codebase_raw)} codebase findings."
+            ]
+        }
+
+    except Exception as e:
+        logger.error("[Triage Agent Error] Correlation failed: %s", e)
+        return {
+            "cleaned_errors": [],
+            "messages": [f"[Triage Agent Error] Correlation LLM invocation failed: {str(e)}"]
+        }
