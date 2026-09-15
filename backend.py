@@ -29,6 +29,7 @@ app.add_middleware(
 class AuditRequest(BaseModel):
     target_url: str
     codebase_path: str
+    git_diff: Optional[str] = None
 
 class AuditResponse(BaseModel):
     status: str
@@ -38,8 +39,6 @@ class AuditResponse(BaseModel):
     remediation_patches_count: int
     summary: Dict[str, Any]
 
-
-# ── ENDPOINTS ─────────────────────────────────────────────────
 @app.get("/")
 async def root():
     return {
@@ -71,6 +70,7 @@ async def run_security_audit(request: AuditRequest):
         "proposed_patch": [],
         "verification_status": "PENDING",
         "codebase_path": [request.codebase_path],
+        "git_diff": request.git_diff,
         "cleaned_errors": [],
         "remediation_plan": [],
         "test_results": [],
