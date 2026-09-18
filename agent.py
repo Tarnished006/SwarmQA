@@ -14,6 +14,7 @@ from triage_agent import triage_agent
 from active_test_agent import active_tester_agent
 from patch_agent import fixing_agent
 from checking_agent import checker_agent, sandbox_execution_node
+from deploy_agent import deploy_agent
 
 load_dotenv()
 
@@ -33,9 +34,12 @@ class Selector(TypedDict):
     test_results: List[str]
     verification_report: List[str]
     next: str
+    # Set by deploy_agent after gatekeeper clears READY_FOR_DEPLOYMENT
+    deployment_status: Optional[str]   # DEPLOYED_AND_LIVE | DEPLOYMENT_FAILED | SKIPPED
+    deployment_url: Optional[str]
 
 class SupervisorDecision(BaseModel):
-    next_node: Literal["Recon_Team", "Red_Team", "Blue_Team", "FINISH"] = Field(
+    next_node: Literal["Recon_Team", "Red_Team", "Blue_Team", "Deploy_Gate", "FINISH"] = Field(
         description="The next specialized team to route the task to, or FINISH if the pipeline is secure."
     )
     reasoning: str
@@ -65,34 +69,49 @@ async def aegis_supervisor(state: Selector) -> dict:
     Supervisor router with deterministic fast-path (0 tokens) and LLM fallback.
     """
     v_status = state.get("verification_status", "PENDING")
+    deploy_status = state.get("deployment_status")
     has_cleaned = bool(state.get("cleaned_errors"))
     has_exploits = bool(state.get("active_debugger"))
 
     # ── Fast Deterministic Routing ($0 tokens) ────────────────
-    if v_status in ("READY_FOR_DEPLOYMENT", "NO_EXPLOITS_CONFIRMED"):
+    # 1. Already deployed or deployment completed/failed
+    if deploy_status in ("DEPLOYED_AND_LIVE", "DEPLOYMENT_FAILED", "SKIPPED"):
         return {"next": "FINISH"}
 
+    # 2. Clean bill of health or gate blocked/manual review
+    if v_status in ("NO_EXPLOITS_CONFIRMED", "BLOCKED", "PARTIAL_WITH_REVIEW"):
+        return {"next": "FINISH"}
+
+    # 3. Verified secure: hand off to Deploy_Gate
+    if v_status == "READY_FOR_DEPLOYMENT":
+        return {"next": "Deploy_Gate"}
+
+    # 4. Recon needed
     if not has_cleaned:
         return {"next": "Recon_Team"}
 
+    # 5. Red Team active probing
     if has_cleaned and not has_exploits and v_status == "PENDING":
         return {"next": "Red_Team"}
 
-    if has_exploits and v_status not in ("READY_FOR_DEPLOYMENT", "NO_EXPLOITS_CONFIRMED"):
+    # 6. Blue Team patch and verification
+    if has_exploits and v_status == "PENDING":
         return {"next": "Blue_Team"}
 
     # ── LLM Routing Fallback (for complex/ambiguous states) ────
     system_prompt = """You are the Aegis DevSecOps Supervisor. Route work dynamically based on state:
     1. Empty `cleaned_errors` -> Route to Recon_Team.
     2. Has `cleaned_errors` but empty `active_debugger` -> Route to Red_Team.
-    3. Has `active_debugger` but `verification_status` is not READY_FOR_DEPLOYMENT -> Route to Blue_Team.
-    4. `verification_status` is READY_FOR_DEPLOYMENT or NO_EXPLOITS_CONFIRMED -> Route to FINISH.
+    3. Has `active_debugger` but `verification_status` is PENDING -> Route to Blue_Team.
+    4. `verification_status` is READY_FOR_DEPLOYMENT -> Route to Deploy_Gate.
+    5. `verification_status` is BLOCKED, PARTIAL_WITH_REVIEW, or NO_EXPLOITS_CONFIRMED -> Route to FINISH.
     """
     human_prompt = f"""
     Current State:
     - Recon Done: {has_cleaned}
     - Exploits Verified: {has_exploits}
     - Verification Status: {v_status}
+    - Deployment Status: {deploy_status}
     Who acts next?
     """
     prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", human_prompt)])
@@ -140,6 +159,7 @@ workflow.add_node("Supervisor", aegis_supervisor)
 workflow.add_node("Recon_Team", recon_team)
 workflow.add_node("Red_Team", red_team)
 workflow.add_node("Blue_Team", blue_team)
+workflow.add_node("Deploy_Gate", deploy_agent)
 
 # The entry point is always the Supervisor
 workflow.add_edge(START, "Supervisor")
@@ -152,11 +172,13 @@ workflow.add_conditional_edges(
         "Recon_Team": "Recon_Team",
         "Red_Team": "Red_Team",
         "Blue_Team": "Blue_Team",
+        "Deploy_Gate": "Deploy_Gate",
         "FINISH": END
     }
 )
 workflow.add_edge("Recon_Team", "Supervisor")
 workflow.add_edge("Red_Team", "Supervisor")
 workflow.add_edge("Blue_Team", "Supervisor")
+workflow.add_edge("Deploy_Gate", END)
 
 aegis_app = workflow.compile()

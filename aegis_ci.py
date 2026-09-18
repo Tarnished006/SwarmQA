@@ -143,6 +143,20 @@ def render_github_step_summary(final_state: Dict[str, Any], output_path: Optiona
             lines.append(f"> {report}")
         lines.append("")
 
+    # Deployment Gate Telemetry
+    deploy_status = final_state.get("deployment_status")
+    deploy_url = final_state.get("deployment_url")
+    if deploy_status and deploy_status != "SKIPPED":
+        deploy_badge = {
+            "DEPLOYED_AND_LIVE": "PASSED (Deployed & Verified Live)",
+            "DEPLOYMENT_FAILED": "FAILED (Deployment or Smoke Tests Failed)",
+        }.get(deploy_status, deploy_status)
+        lines.append("### Cloud Deployment Gate")
+        lines.append(f"- **Deployment Status**: `{deploy_badge}`")
+        if deploy_url:
+            lines.append(f"- **Target Live URL**: {deploy_url}")
+        lines.append("")
+
     summary_content = "\n".join(lines)
 
     # Write to target path (e.g. $GITHUB_STEP_SUMMARY)
@@ -178,6 +192,10 @@ async def run_ci_gate(args: argparse.Namespace) -> int:
     logger.info("Git Diff Present:  %s", "YES" if git_diff else "NO (Full Scan)")
     logger.info("============================================================")
 
+    deploy_platform = getattr(args, "deploy_platform", None)
+    if deploy_platform:
+        os.environ["AEGIS_DEPLOY_PLATFORM"] = deploy_platform
+
     initial_state = {
         "messages": [],
         "url": target_url,
@@ -192,6 +210,8 @@ async def run_ci_gate(args: argparse.Namespace) -> int:
         "remediation_plan": [],
         "test_results": [],
         "verification_report": [],
+        "deployment_status": None,
+        "deployment_url": None,
         "next": "Recon_Team",
     }
 
@@ -202,7 +222,8 @@ async def run_ci_gate(args: argparse.Namespace) -> int:
         return 1
 
     v_status = final_state.get("verification_status", "UNKNOWN")
-    logger.info("[CI Gate Completed] Final Status: %s", v_status)
+    deploy_status = final_state.get("deployment_status")
+    logger.info("[CI Gate Completed] Final Verification Status: %s | Deployment Status: %s", v_status, deploy_status)
 
     # Resolve summary output path (prioritize GITHUB_STEP_SUMMARY environment variable)
     summary_path = os.getenv("GITHUB_STEP_SUMMARY") or args.summary_file
@@ -214,6 +235,8 @@ async def run_ci_gate(args: argparse.Namespace) -> int:
             with open(args.json_report, "w", encoding="utf-8") as f:
                 json.dump({
                     "verification_status": v_status,
+                    "deployment_status": deploy_status,
+                    "deployment_url": final_state.get("deployment_url"),
                     "cleaned_errors": final_state.get("cleaned_errors", []),
                     "active_debugger": final_state.get("active_debugger", []),
                     "remediation_plan": final_state.get("remediation_plan", []),
@@ -224,6 +247,10 @@ async def run_ci_gate(args: argparse.Namespace) -> int:
             logger.warning("[CI JSON Report] Failed to write JSON report: %s", e)
 
     # Exit code determination
+    if deploy_status == "DEPLOYMENT_FAILED" and args.fail_on_critical:
+        logger.error("[CI Result: FAIL] Deployment or post-deploy smoke tests failed.")
+        return 1
+
     if v_status in ("READY_FOR_DEPLOYMENT", "NO_EXPLOITS_CONFIRMED"):
         logger.info("[CI Result: PASS] Security gates cleared.")
         return 0
@@ -242,7 +269,8 @@ def main():
     parser.add_argument("--target-url", default=None, help="Target URL for dynamic recon and probe checks")
     parser.add_argument("--base-ref", default=None, help="Base Git ref to diff against (e.g. origin/main, HEAD~1)")
     parser.add_argument("--diff-file", default=None, help="Path to pre-computed git diff file")
-    parser.add_argument("--fail-on-critical", action="store_true", default=False, help="Exit with code 1 if status is not READY_FOR_DEPLOYMENT")
+    parser.add_argument("--deploy-platform", default=None, help="Target deployment platform (vercel, render, railway, aws_ecs). Overrides AEGIS_DEPLOY_PLATFORM env var.")
+    parser.add_argument("--fail-on-critical", action="store_true", default=False, help="Exit with code 1 if status is not READY_FOR_DEPLOYMENT or deploy fails")
     parser.add_argument("--summary-file", default="aegis_summary.md", help="Path to write GitHub step summary markdown")
     parser.add_argument("--json-report", default=None, help="Path to write raw JSON audit report")
 

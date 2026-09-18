@@ -1,0 +1,125 @@
+﻿version: "3.9"
+
+# =========================================================================
+# Project Aegis - Docker Compose (Production Stack)
+# =========================================================================
+# Services:
+#   redis       -- Redis 7.2 Alpine (message broker + job store + cache)
+#   aegis-api   -- FastAPI backend (async job queue gateway)
+#   aegis-worker -- ARQ background worker (runs LangGraph pipeline)
+#
+# Quick start:
+#   docker compose up --build
+#
+# Scale workers:
+#   docker compose up --scale aegis-worker=3
+
+services:
+
+  # ── Redis ──────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: aegis-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1
+      --appendonly yes
+      --requirepass "${REDIS_PASSWORD:-}"
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aegis-net
+
+  # ── FastAPI Gateway ────────────────────────────────────────────────────
+  aegis-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: aegis-api
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-}@redis:6379/0"
+      AEGIS_API_KEY: "${AEGIS_API_KEY:-}"
+      AEGIS_MAX_CONCURRENT_AUDITS: "${AEGIS_MAX_CONCURRENT_AUDITS:-5}"
+      AEGIS_RATE_LIMIT_RPM: "${AEGIS_RATE_LIMIT_RPM:-10}"
+      AEGIS_CACHE_TTL: "${AEGIS_CACHE_TTL:-3600}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
+      CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS:-http://localhost:3000}"
+      ALLOW_LOCAL_TARGETS: "${ALLOW_LOCAL_TARGETS:-false}"
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - aegis-net
+
+  # ── ARQ Worker ─────────────────────────────────────────────────────────
+  aegis-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-}@redis:6379/0"
+      AEGIS_JOB_TIMEOUT_S: "${AEGIS_JOB_TIMEOUT_S:-1800}"
+      AEGIS_WORKER_CONCURRENCY: "${AEGIS_WORKER_CONCURRENCY:-3}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
+      AEGIS_DEPLOY_PLATFORM: "${AEGIS_DEPLOY_PLATFORM:-}"
+      VERCEL_DEPLOY_HOOK: "${VERCEL_DEPLOY_HOOK:-}"
+      RENDER_SERVICE_ID: "${RENDER_SERVICE_ID:-}"
+      RENDER_API_KEY: "${RENDER_API_KEY:-}"
+      RAILWAY_TOKEN: "${RAILWAY_TOKEN:-}"
+      RAILWAY_SERVICE_ID: "${RAILWAY_SERVICE_ID:-}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+      AWS_ECS_CLUSTER: "${AWS_ECS_CLUSTER:-}"
+      AWS_ECS_SERVICE: "${AWS_ECS_SERVICE:-}"
+      CRAWLER_HEADLESS: "true"
+      ALLOW_LOCAL_TARGETS: "${ALLOW_LOCAL_TARGETS:-false}"
+    volumes:
+      - .:/app
+      - /var/run/docker.sock:/var/run/docker.sock  # for Docker sandbox
+    deploy:
+      replicas: 1  # increase with --scale aegis-worker=N
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+    networks:
+      - aegis-net
+
+# ── Volumes & Networks ────────────────────────────────────────────────────
+volumes:
+  redis_data:
+    driver: local
+
+networks:
+  aegis-net:
+    driver: bridge

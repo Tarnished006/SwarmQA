@@ -106,6 +106,7 @@ def extract_relevant_codebase_contents(repo_path: str, active_debugger: List[str
         return "No local codebase repository path available."
 
     targeted_files = set()
+    canonical_repo = os.path.realpath(repo_path)
     for item in active_debugger:
         try:
             data = json.loads(item)
@@ -113,8 +114,17 @@ def extract_relevant_codebase_contents(repo_path: str, active_debugger: List[str
             # Strip line numbers: "routes/search.py:L42" -> "routes/search.py"
             clean_file = rem_target.split(":")[0].strip()
             if clean_file and not clean_file.startswith("http"):
-                # Normalize path separators
+                # Normalize path separators and strip leading slashes/dots
                 norm_file = clean_file.replace("/", os.sep).replace("\\", os.sep)
+                norm_file = norm_file.lstrip(os.sep + ".")
+                # PATH TRAVERSAL GUARD: Validate it stays inside the repo
+                candidate = os.path.realpath(os.path.join(canonical_repo, norm_file))
+                if not candidate.startswith(canonical_repo + os.sep) and candidate != canonical_repo:
+                    logger.warning(
+                        "[Patch Agent] SECURITY: Path traversal blocked for remediation_target: %r -> %r",
+                        rem_target, candidate
+                    )
+                    continue
                 targeted_files.add(norm_file)
         except Exception:
             pass
@@ -125,7 +135,11 @@ def extract_relevant_codebase_contents(repo_path: str, active_debugger: List[str
 
     # 1. Target files specifically identified by Red Team
     for rel_file in targeted_files:
-        full_path = os.path.join(repo_path, rel_file) if not os.path.isabs(rel_file) else rel_file
+        full_path = os.path.realpath(os.path.join(canonical_repo, rel_file))
+        # Double-check boundary after join (symlink safety)
+        if not full_path.startswith(canonical_repo + os.sep):
+            logger.warning("[Patch Agent] SECURITY: Symlink escape blocked for: %r", rel_file)
+            continue
         if os.path.isfile(full_path):
             try:
                 with open(full_path, "r", encoding="utf-8", errors="replace") as f:

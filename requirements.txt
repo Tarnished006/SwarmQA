@@ -1,3 +1,11 @@
+# ── NEW: Redis + Job Queue + Stealth Crawler ─────────────────────────────────
+redis>=5.0.8
+arq>=0.25.0
+playwright>=1.45.0
+playwright-stealth>=1.0.6
+uvloop>=0.19.0; sys_platform != "win32"
+
+# ── EXISTING ──────────────────────────────────────────────────────────────────
 aiofile==3.11.1
 annotated-doc==0.0.4
 annotated-types==0.7.0

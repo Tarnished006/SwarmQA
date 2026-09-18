@@ -13,14 +13,29 @@ from typing import Tuple
 
 logger = logging.getLogger("aegis.pipeline_guard")
 
-# Known prompt injection & jailbreak patterns to defang
+# Known prompt injection & jailbreak patterns to defang.
+# All regex patterns use possessive/atomic-safe constructs to prevent ReDoS.
 INJECTION_PATTERNS = [
+    # ── Role-override / instruction-cancel attacks ─────────────────────────
     (re.compile(r"ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions", re.IGNORECASE), "[DEFANGED_INSTRUCTION_OVERRIDE]"),
     (re.compile(r"disregard\s+(?:all\s+)?(?:previous|prior|above)\s+(?:rules|instructions|prompts)", re.IGNORECASE), "[DEFANGED_INSTRUCTION_OVERRIDE]"),
+    (re.compile(r"forget\s+(?:all\s+)?(?:previous|prior|above)\s+(?:rules|instructions|context)", re.IGNORECASE), "[DEFANGED_INSTRUCTION_OVERRIDE]"),
+    (re.compile(r"new\s+instructions?\s*:", re.IGNORECASE), "[DEFANGED_INSTRUCTION_OVERRIDE]:"),
+    (re.compile(r"override\s+(?:all\s+)?(?:previous\s+)?(?:instructions?|rules?|constraints?)", re.IGNORECASE), "[DEFANGED_INSTRUCTION_OVERRIDE]"),
+    # ── Role-hijack / persona attacks ─────────────────────────────────────
     (re.compile(r"you\s+are\s+now\s+(?:in\s+developer\s+mode|dan|a\s+different\s+model|unrestricted)", re.IGNORECASE), "[DEFANGED_ROLE_HIJACK]"),
+    (re.compile(r"act\s+as\s+(?:an?\s+)?(?:different|unrestricted|jailbroken|evil|dan)\s+(?:ai|model|assistant|gpt)", re.IGNORECASE), "[DEFANGED_ROLE_HIJACK]"),
+    (re.compile(r"pretend\s+(?:you\s+are|to\s+be)\s+(?:an?\s+)?(?:different|unrestricted|jailbroken|evil|dan)\s+(?:ai|model|assistant|gpt)", re.IGNORECASE), "[DEFANGED_ROLE_HIJACK]"),
+    (re.compile(r"your\s+new\s+role\s+is", re.IGNORECASE), "[DEFANGED_ROLE_HIJACK]"),
+    (re.compile(r"\bdan\s+mode\b", re.IGNORECASE), "[DEFANGED_ROLE_HIJACK]"),
+    # ── System prompt / delimiter injection ────────────────────────────────
     (re.compile(r"(?:system\s+prompt|developer\s+message)\s*:", re.IGNORECASE), "[DEFANGED_SYSTEM_DELIMITER]:"),
+    (re.compile(r"confidential\s+system\s+(?:prompt|instructions?)\s*:", re.IGNORECASE), "[DEFANGED_SYSTEM_DELIMITER]:"),
+    # ── Status / evasion overrides ─────────────────────────────────────────
     (re.compile(r"report\s+(?:zero|no)\s+vulnerabilities", re.IGNORECASE), "[DEFANGED_EVASION_DIRECTIVE]"),
+    (re.compile(r"bypass\s+(?:all\s+)?(?:security|safety|filter|guard|check)", re.IGNORECASE), "[DEFANGED_EVASION_DIRECTIVE]"),
     (re.compile(r"set\s+verification_status\s+to\s+READY_FOR_DEPLOYMENT", re.IGNORECASE), "[DEFANGED_STATUS_OVERRIDE]"),
+    # ── Delimiter / turn-sequence spoofing ────────────────────────────────
     (re.compile(r"human\s*:\s*ignore", re.IGNORECASE), "[DEFANGED_DELIMITER]"),
     (re.compile(r"assistant\s*:\s*i\s+will", re.IGNORECASE), "[DEFANGED_DELIMITER]"),
 ]

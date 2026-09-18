@@ -18,6 +18,7 @@ Key Architecture & Safeguards:
 """
 import asyncio
 import io
+import ipaddress
 import json
 import logging
 import os
@@ -50,7 +51,7 @@ class ScopeViolationError(Exception):
 
 
 # ── 1. SCOPE VALIDATION & FORBIDDEN TARGETS ───────────────────
-BLOCKED_HOSTS = {"169.254.169.254", "metadata.google.internal"}
+BLOCKED_HOSTS = {"169.254.169.254", "metadata.google.internal", "fd00:ec2::254"}
 ALLOWED_SANDBOX_SUFFIXES = tuple(
     s.strip() for s in os.getenv(
         "ALLOWED_SANDBOX_SUFFIXES", ".sandbox.internal,.staging.internal,localhost,127.0.0.1"
@@ -65,11 +66,27 @@ def _validate_scope(target_url: str) -> Tuple[bool, str, str]:
     hostname = urlparse(target_url).hostname or ""
     if not hostname:
         return False, "", "target_url has no resolvable hostname."
-    if hostname in BLOCKED_HOSTS:
+    hostname_lc = hostname.lower()
+
+    # Block explicit forbidden hosts (metadata endpoints)
+    if hostname_lc in BLOCKED_HOSTS:
         return False, hostname, f"Target host '{hostname}' is a forbidden cloud metadata address."
+
+    # Block literal private/loopback/link-local IPs (RFC 1918, RFC 5735, RFC 4193)
+    if not ALLOW_ALL_TARGETS:
+        try:
+            ip = ipaddress.ip_address(hostname_lc)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return False, hostname, (
+                    f"Target IP '{hostname}' is a private/reserved address. "
+                    "Set ALLOW_ALL_TARGETS=true to test internal environments."
+                )
+        except ValueError:
+            pass  # Not a raw IP literal — hostname; DNS resolution happens at test time
+
     if ALLOW_ALL_TARGETS:
         return True, hostname, ""
-    if any(hostname == s or hostname.endswith(s) for s in ALLOWED_SANDBOX_SUFFIXES):
+    if any(hostname_lc == s or hostname_lc.endswith(s) for s in ALLOWED_SANDBOX_SUFFIXES):
         return True, hostname, ""
     return False, hostname, (
         f"Hostname '{hostname}' does not match allowed sandbox suffixes {ALLOWED_SANDBOX_SUFFIXES}. "
@@ -209,12 +226,26 @@ class LocalSubprocessSandbox:
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(script_code)
 
-        # Sanitize environment: drop cloud credentials and API keys
+        # Sanitize environment: drop ALL cloud credentials and API keys
         sanitized_env = os.environ.copy()
         sensitive_vars = [
-            "OPENAI_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY",
+            # Aegis secrets
+            "OPENAI_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY",
+            "ALERT_WEBHOOK_URL", "SLACK_WEBHOOK_URL", "DISCORD_WEBHOOK_URL",
+            # AWS
             "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-            "GITHUB_TOKEN", "DATABASE_URL", "REDIS_URL"
+            "AWS_DEFAULT_REGION", "AWS_PROFILE",
+            # GCP
+            "GOOGLE_APPLICATION_CREDENTIALS", "GCLOUD_PROJECT",
+            # Azure
+            "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_TENANT_ID",
+            # SCM / CI
+            "GITHUB_TOKEN", "GITLAB_TOKEN", "BITBUCKET_TOKEN",
+            "CI_JOB_TOKEN", "ACTIONS_RUNTIME_TOKEN",
+            # DBs
+            "DATABASE_URL", "REDIS_URL", "POSTGRES_URL", "MONGO_URL",
+            # Payment/other SaaS
+            "STRIPE_SECRET_KEY", "STRIPE_API_KEY",
         ]
         for var in sensitive_vars:
             sanitized_env.pop(var, None)
