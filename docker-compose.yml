@@ -1,4 +1,4 @@
-﻿version: "3.9"
+version: "3.9"
 
 # =========================================================================
 # Project Aegis - Docker Compose (Production Stack)
@@ -44,7 +44,7 @@ services:
   aegis-api:
     build:
       context: .
-      dockerfile: Dockerfile.api
+      dockerfile: docker/Dockerfile.api
     container_name: aegis-api
     restart: unless-stopped
     depends_on:
@@ -78,7 +78,7 @@ services:
   aegis-worker:
     build:
       context: .
-      dockerfile: Dockerfile.worker
+      dockerfile: docker/Dockerfile.worker
     restart: unless-stopped
     depends_on:
       redis:

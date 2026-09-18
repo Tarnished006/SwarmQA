@@ -1,0 +1,3 @@
+[console_scripts]
+aegis-ci = aegis.cli.ci:main
+aegis-worker = aegis.worker.tasks:main
