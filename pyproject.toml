@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aegis"
+version = "2.0.0"
+description = "Project Aegis — Autonomous Multi-Agent DevSecOps & Remediation Engine"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Project Aegis Team" }
+]
+license = { text = "MIT" }
+keywords = ["security", "devsecops", "multi-agent", "langgraph", "sast", "remediation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+
+dependencies = [
+    "aiofile>=3.11.1",
+    "arq>=0.26.0",
+    "click>=8.1.0",
+    "docker>=7.0.0",
+    "fastapi>=0.110.0",
+    "fastmcp>=0.1.0",
+    "httpx>=0.27.0",
+    "langchain-classic>=0.1.0",
+    "langchain-core>=0.2.0",
+    "langchain-openai>=0.1.0",
+    "langgraph>=0.2.0",
+    "playwright>=1.40.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.2.0",
+    "python-dotenv>=1.0.0",
+    "pytest>=8.0.0",
+    "redis>=5.0.0",
+    "uvicorn[standard]>=0.29.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+[project.scripts]
+aegis-ci = "aegis.cli.ci:main"
+aegis-worker = "aegis.worker.tasks:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+python_files = "test_*.py"
