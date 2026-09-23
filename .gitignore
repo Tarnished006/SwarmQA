@@ -1,0 +1,7 @@
+
+.env
+__pycache__/
+.agent
+.agents
+.env.example
+skills-lock.json

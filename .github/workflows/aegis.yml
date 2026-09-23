@@ -1,0 +1,66 @@
+name: Project Aegis — Autonomous DevSecOps Gate
+
+on:
+  pull_request:
+    branches: [ main, master, develop ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: aegis-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-gate:
+    name: Aegis Multi-Agent Security Audit
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout Code with Full History
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+
+      - name: Run Project Aegis Autonomous Security Gate
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL || 'gpt-4o-mini' }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          ALLOW_LOCAL_TARGETS: "true"
+          ALLOW_ALL_TARGETS: "true"
+        run: |
+          python aegis_ci.py \
+            --repo . \
+            --base-ref origin/${{ github.base_ref || 'main' }} \
+            --fail-on-critical \
+            --json-report aegis-report.json
+
+      - name: Archive Aegis Alerts and Audit Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aegis-audit-artifacts
+          path: |
+            aegis-report.json
+            aegis_summary.md
+            .aegis_alerts/
+          if-no-files-found: ignore
