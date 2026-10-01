@@ -5,3 +5,6 @@ __pycache__/
 .agents
 .env.example
 skills-lock.json
+.aegis_alerts/
+.aegis_reports/
+*.egg-info/

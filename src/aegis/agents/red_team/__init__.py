@@ -5,6 +5,7 @@ from aegis.agents.red_team.active_tester import (
     active_tester_agent,
     DockerSandbox,
     LocalSubprocessSandbox,
+    E2BSandbox,
     create_sandbox,
 )
 
@@ -12,5 +13,6 @@ __all__ = [
     "active_tester_agent",
     "DockerSandbox",
     "LocalSubprocessSandbox",
+    "E2BSandbox",
     "create_sandbox",
 ]
